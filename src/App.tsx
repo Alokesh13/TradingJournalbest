@@ -1,5 +1,5 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState, useRef } from "react";
- 
+
 type AuthMode = "login" | "signup";
 type View = "dashboard" | "add" | "analytics" | "detail";
 type Direction = "LONG" | "SHORT";
@@ -445,6 +445,26 @@ function downloadBlob(filename: string, content: string, type: string) {
   anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
+}
+
+function iconifyEditDeleteButtons() {
+  const buttons = Array.from(document.querySelectorAll("button"));
+
+  buttons.forEach((button) => {
+    const label = button.textContent?.trim();
+    if ((label !== "Edit" && label !== "Delete") || button.dataset.iconified === "true") {
+      return;
+    }
+
+    const isEdit = label === "Edit";
+    button.dataset.iconified = "true";
+    button.setAttribute("aria-label", isEdit ? "Edit trade" : "Delete trade");
+    button.setAttribute("title", isEdit ? "Edit trade" : "Delete trade");
+    button.classList.add("inline-flex", "items-center", "justify-center", "p-2");
+    button.innerHTML = isEdit
+      ? '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"></path><path d="M13 7l4 4"></path></svg>'
+      : '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h16"></path><path d="M9 7V5h6v2"></path><path d="M7 7l1 13h8l1-13"></path><path d="M10 11v6M14 11v6"></path></svg>';
+  });
 }
 
 function StarRating({ rating }: { rating: number }) {
@@ -1082,6 +1102,10 @@ function AdvancedMetrics({ trades }: { trades: Trade[] }) {
 }
 
 function App() {
+  useEffect(() => {
+    iconifyEditDeleteButtons();
+  });
+
   const [users, setUsers] = useState<UserAccount[]>(() => loadUsers());
   const [sessionUserId, setSessionUserId] = useState<string | null>(() => readLocalStorage(SESSION_STORAGE));
   const [authMode, setAuthMode] = useState<AuthMode>("login");
@@ -2169,9 +2193,105 @@ function App() {
                   title={`${selectedTrade.asset} Trade Review`}
                   eyebrow="Trade detail page"
                   action={
-                    <button type="button" onClick={() => setView("dashboard")} className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-100 transition hover:bg-white/[0.08]">
-                      Back to Journal
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!currentUser) {
+                            return;
+                          }
+
+                          const pnlInput = window.prompt("Edit P/L ($)", String(selectedTrade.pnl));
+                          if (pnlInput === null) {
+                            return;
+                          }
+
+                          const roiInput = window.prompt("Edit ROI (%)", String(selectedTrade.roi));
+                          if (roiInput === null) {
+                            return;
+                          }
+
+                          const nextPnl = Number(pnlInput);
+                          const nextRoi = Number(roiInput);
+
+                          if (Number.isNaN(nextPnl) || Number.isNaN(nextRoi)) {
+                            window.alert("Please enter valid numeric values for P/L and ROI.");
+                            return;
+                          }
+
+                          setUsers((previousUsers) =>
+                            previousUsers.map((user) => {
+                              if (user.id !== currentUser.id) {
+                                return user;
+                              }
+
+                              return {
+                                ...user,
+                                trades: user.trades.map((trade) =>
+                                  trade.id === selectedTrade.id
+                                    ? {
+                                        ...trade,
+                                        pnl: nextPnl,
+                                        roi: nextRoi,
+                                      }
+                                    : trade,
+                                ),
+                              };
+                            }),
+                          );
+                        }}
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-white/[0.04] text-slate-100 transition hover:bg-white/[0.08]"
+                        aria-label="Edit trade"
+                        title="Edit trade"
+                      >
+                        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                          <path d="M4 20h4l10-10-4-4L4 16v4z" />
+                          <path d="M13 7l4 4" />
+                        </svg>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!currentUser) {
+                            return;
+                          }
+
+                          const shouldDelete = window.confirm("Delete this trade permanently?");
+                          if (!shouldDelete) {
+                            return;
+                          }
+
+                          setUsers((previousUsers) =>
+                            previousUsers.map((user) => {
+                              if (user.id !== currentUser.id) {
+                                return user;
+                              }
+
+                              return {
+                                ...user,
+                                trades: user.trades.filter((trade) => trade.id !== selectedTrade.id),
+                              };
+                            }),
+                          );
+
+                          setSelectedTradeId(null);
+                          setView("dashboard");
+                        }}
+                        className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-rose-400/30 bg-rose-400/10 text-rose-200 transition hover:bg-rose-400/20"
+                        aria-label="Delete trade"
+                        title="Delete trade"
+                      >
+                        <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                          <path d="M4 7h16" />
+                          <path d="M9 7V5h6v2" />
+                          <path d="M7 7l1 13h8l1-13" />
+                          <path d="M10 11v6M14 11v6" />
+                        </svg>
+                      </button>
+                      <button type="button" onClick={() => setView("dashboard")} className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-100 transition hover:bg-white/[0.08]">
+                        Back to Journal
+                      </button>
+                    </div>
                   }
                 >
                   <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
