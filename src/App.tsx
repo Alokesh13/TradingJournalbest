@@ -1,5 +1,5 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState, useRef } from "react";
-
+ 
 type AuthMode = "login" | "signup";
 type View = "dashboard" | "add" | "analytics" | "detail";
 type Direction = "LONG" | "SHORT";
