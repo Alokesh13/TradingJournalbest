@@ -1,5 +1,6 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState, useRef } from "react";
 import Login from "./components/Login";
+import { supabase } from "./lib/supabase";
 
 type AuthMode = "login" | "signup";
 type View = "dashboard" | "add" | "analytics";
@@ -2492,7 +2493,7 @@ function App() {
                     </SectionCard>
                     <SectionCard title="Weekday Performance" eyebrow="Best trading days">
                         <WeekdayPerformanceChart data={filteredAnalytics.weekdayPerformance} />
-                    </SectionCard>
+                   </SectionCard>
                 </div>
 
                 <div className="grid gap-6 xl:grid-cols-3">
