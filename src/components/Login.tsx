@@ -11,8 +11,11 @@ export default function Login() {
       password
     })
 
-    if (error) alert(error.message)
-    else alert("Login successful")
+    if (error) {
+      alert(error.message)
+    } else {
+      alert("Login successful")
+    }
   }
 
   const handleSignup = async () => {
@@ -21,17 +24,19 @@ export default function Login() {
       password
     })
 
-    if (error) alert(error.message)
-    else alert("Account created. Check email.")
+    if (error) {
+      alert(error.message)
+    } else {
+      alert("Account created. Check your email.")
+    }
   }
 
   return (
-    <div className="flex flex-col gap-4 max-w-sm mx-auto mt-40">
+    <div style={{display:"flex",flexDirection:"column",gap:"10px",maxWidth:"300px",margin:"100px auto"}}>
       <input
         placeholder="Email"
         value={email}
         onChange={(e) => setEmail(e.target.value)}
-        className="border p-2"
       />
 
       <input
@@ -39,16 +44,11 @@ export default function Login() {
         placeholder="Password"
         value={password}
         onChange={(e) => setPassword(e.target.value)}
-        className="border p-2"
       />
 
-      <button onClick={handleLogin} className="bg-black text-white p-2">
-        Login
-      </button>
+      <button onClick={handleLogin}>Login</button>
 
-      <button onClick={handleSignup} className="border p-2">
-        Sign Up
-      </button>
+      <button onClick={handleSignup}>Sign Up</button>
     </div>
   )
 }
