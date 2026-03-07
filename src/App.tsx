@@ -1381,6 +1381,23 @@ function AdvancedMetrics({ trades }: { trades: Trade[] }) {
 }
 
 function App() {
+
+const [session, setSession] = useState(null);
+
+useEffect(() => {
+  supabase.auth.getSession().then(({ data }) => {
+    setSession(data.session);
+  });
+
+  const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    setSession(session);
+  });
+
+  return () => {
+    listener.subscription.unsubscribe();
+  };
+}, []);
+
   useEffect(() => {
     iconifyEditDeleteButtons();
   });
@@ -1605,9 +1622,9 @@ function App() {
     event.preventDefault();
     setTradeError("");
 
-    if (!currentUser) {
-      return;
-    }
+ if (!session) {
+  return <Login />;
+}
 
     const lotSize = Number(tradeForm.lotSize);
     const pnl = Number(tradeForm.pnl);
