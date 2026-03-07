@@ -1500,94 +1500,41 @@ useEffect(() => {
 
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setAuthError("");
-    setAuthBusy(true);
+  event.preventDefault();
+  setAuthError("");
+  setAuthBusy(true);
 
-    try {
-      const email = authForm.email.trim().toLowerCase();
-      const password = authForm.password.trim();
-      const name = authForm.name.trim();
+  const email = authForm.email.trim();
+  const password = authForm.password.trim();
 
-      if (!email || !password || (authMode === "signup" && !name)) {
-        setAuthError("Complete the form to access your private journal.");
-        return;
-      }
+  try {
+    if (authMode === "signup") {
 
-      if (password.length < 6) {
-        setAuthError("Use at least 6 characters for your password.");
-        return;
-      }
+      const { error } = await supabase.auth.signUp({
+        email,
+        password,
+      });
 
-      if (authMode === "signup") {
-        const existingUser = users.find((user) => user.email.toLowerCase() === email);
+      if (error) throw error;
 
-        if (existingUser) {
-          setAuthError("An account with that email already exists.");
-          return;
-        }
+    } else {
 
-        const passwordRecord = await createPasswordRecord(password);
-        const newUser: UserAccount = {
-          id: createId(),
-          name,
-          email,
-          passwordHash: passwordRecord.passwordHash,
-          salt: passwordRecord.salt,
-          trades: sampleTrades(),
-        };
+      const { error } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-        setUsers((previousUsers) => [...previousUsers, newUser]);
-        setSessionUserId(newUser.id);
-        setView("dashboard");
-        setAuthForm({ name: "", email: "", password: "" });
-        return;
-      }
+      if (error) throw error;
 
-      const matchedUser = users.find((user) => user.email.toLowerCase() === email);
-
-      if (!matchedUser) {
-        setAuthError("Email or password does not match an existing account.");
-        return;
-      }
-
-      let authenticated = false;
-
-      if (matchedUser.passwordHash && matchedUser.salt) {
-        const submittedHash = await hashPassword(password, matchedUser.salt);
-        authenticated = submittedHash === matchedUser.passwordHash;
-      } else if (matchedUser.legacyPassword) {
-        authenticated = matchedUser.legacyPassword === password;
-
-        if (authenticated) {
-          const passwordRecord = await createPasswordRecord(password);
-          setUsers((previousUsers) =>
-            previousUsers.map((user) =>
-              user.id === matchedUser.id
-                ? {
-                    ...user,
-                    passwordHash: passwordRecord.passwordHash,
-                    salt: passwordRecord.salt,
-                    legacyPassword: undefined,
-                  }
-                : user,
-            ),
-          );
-        }
-      }
-
-      if (!authenticated) {
-        setAuthError("Email or password does not match an existing account.");
-        return;
-      }
-
-      setSessionUserId(matchedUser.id);
       setView("dashboard");
-      setAuthForm({ name: "", email: "", password: "" });
-    } finally {
-      setAuthBusy(false);
     }
+
+  } catch (err: any) {
+    setAuthError(err.message);
   }
+
+  setAuthBusy(false);
+}
 
   function handleLogout() {
     setSessionUserId(null);
