@@ -1,4 +1,5 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState, useRef } from "react";
+import Login from "./components/Login";
 
 type AuthMode = "login" | "signup";
 type View = "dashboard" | "add" | "analytics";
