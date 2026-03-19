@@ -1,9 +1,7 @@
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState, useRef } from "react";
-import Login from "./components/Login";
-import { supabase } from "./lib/supabase";
 
 type AuthMode = "login" | "signup";
-type View = "dashboard" | "add" | "analytics";
+type View = "dashboard" | "add" | "analytics" | "detail";
 type Direction = "LONG" | "SHORT";
 type TradeType = "Exit" | "Stop Loss" | "Take Profit";
 type Outcome = "Win" | "Loss" | "Breakeven";
@@ -17,15 +15,12 @@ type Trade = {
   timeframe: string;
   direction: Direction;
   type: TradeType;
-  lotSize: number | null; // Changed to null by default
+  lotSize: number;
   ruleFollowed: boolean;
   outcome: Outcome;
   roi: number;
   pnl: number;
   rating: number;
-  entryPrice: number;
-  exitPrice: number;
-  riskReward: number;
   strategy: string;
   notes: string;
   emotion: string;
@@ -94,9 +89,6 @@ type TradeAnalytics = {
   hourlyPerformance: { hour: string; value: number }[];
   weekdayPerformance: { day: string; value: number; count: number }[];
   expectancy: number;
-  drawdownCurve: { label: string; value: number }[];
-  profitByAsset: { asset: string; value: number }[];
-  durationVsPnL: { duration: number; pnl: number; asset: string; outcome: Outcome }[];
 };
 
 const USERS_STORAGE = "tradetracker-users";
@@ -122,20 +114,28 @@ function readLocalStorage(key: string) {
   return window.localStorage.getItem(key);
 }
 
+function toInputDate(date: Date) {
+  // Format date as YYYY-MM-DDTHH:MM for datetime-local input without timezone shift
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
 function emptyTradeForm(): TradeFormState {
   const now = new Date();
-  const offset = now.getTimezoneOffset();
-  const localDate = new Date(now.getTime() - offset * 60_000);
-  const dateStr = localDate.toISOString().slice(0, 16);
+  const oneMinuteLater = new Date(now.getTime() + 1 * 60_000);
 
   return {
-    startDate: dateStr,
-    endDate: dateStr,
+    startDate: toInputDate(now),
+    endDate: toInputDate(oneMinuteLater),
     asset: "XAUUSD",
-    timeframe: "1m", // Default 1 minute
+    timeframe: "1m",
     direction: "LONG",
     type: "Take Profit",
-    lotSize: "", // Blank by default
+    lotSize: "",
     ruleFollowed: true,
     outcome: "Win",
     roi: "",
@@ -297,15 +297,6 @@ function getESTHour(dateString: string) {
   );
 }
 
-function getESTDate(dateString: string) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: EST_TIMEZONE,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(dateString));
-}
-
 function buildTradeAnalytics(trades: Trade[]): TradeAnalytics {
   const totalTrades = trades.length;
   const totalPnL = sumProfit(trades);
@@ -346,46 +337,12 @@ function buildTradeAnalytics(trades: Trade[]): TradeAnalytics {
   ];
 
   const sortedTrades = [...trades].sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
-  
   let runningTotal = 0;
-  let peakValue = 0;
-  const equityCurve = [];
-  const drawdownCurve = [];
-
-  for (const trade of sortedTrades) {
+  const equityCurve = sortedTrades.map((trade) => {
     runningTotal += trade.pnl;
-    if (runningTotal > peakValue) peakValue = runningTotal;
-    
-    const drawdown = peakValue === 0 ? 0 : runningTotal - peakValue;
-
-    equityCurve.push({
+    return {
       label: formatEST(trade.startDate, { month: "short", day: "numeric" }),
       value: runningTotal,
-    });
-    
-    drawdownCurve.push({
-      label: formatEST(trade.startDate, { month: "short", day: "numeric" }),
-      value: drawdown,
-    });
-  }
-
-  const profitByAsset = Object.entries(
-    trades.reduce<Record<string, number>>((acc, t) => {
-      acc[t.asset] = (acc[t.asset] ?? 0) + t.pnl;
-      return acc;
-    }, {})
-  ).map(([asset, value]) => ({ asset, value }))
-   .sort((a, b) => b.value - a.value);
-
-  const durationVsPnL = trades.map((t) => {
-    const start = new Date(t.startDate).getTime();
-    const end = new Date(t.endDate).getTime();
-    const duration = Math.max(0, (end - start) / 60000); // minutes
-    return {
-      duration,
-      pnl: t.pnl,
-      asset: t.asset,
-      outcome: t.outcome
     };
   });
 
@@ -412,9 +369,6 @@ function buildTradeAnalytics(trades: Trade[]): TradeAnalytics {
     hourlyPerformance: hourlyMap,
     weekdayPerformance: calculateWeekdayPerformance(trades),
     expectancy: calculateExpectancy(trades),
-    drawdownCurve,
-    profitByAsset,
-    durationVsPnL,
   };
 }
 
@@ -494,26 +448,6 @@ function downloadBlob(filename: string, content: string, type: string) {
   URL.revokeObjectURL(url);
 }
 
-function iconifyEditDeleteButtons() {
-  const buttons = Array.from(document.querySelectorAll("button"));
-
-  buttons.forEach((button) => {
-    const label = button.textContent?.trim();
-    if ((label !== "Edit" && label !== "Delete") || button.dataset.iconified === "true") {
-      return;
-    }
-
-    const isEdit = label === "Edit";
-    button.dataset.iconified = "true";
-    button.setAttribute("aria-label", isEdit ? "Edit trade" : "Delete trade");
-    button.setAttribute("title", isEdit ? "Edit trade" : "Delete trade");
-    button.classList.add("inline-flex", "items-center", "justify-center", "p-2");
-    button.innerHTML = isEdit
-      ? '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 20h4l10-10-4-4L4 16v4z"></path><path d="M13 7l4 4"></path></svg>'
-      : '<svg viewBox="0 0 24 24" class="h-4 w-4" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h16"></path><path d="M9 7V5h6v2"></path><path d="M7 7l1 13h8l1-13"></path><path d="M10 11v6M14 11v6"></path></svg>';
-  });
-}
-
 function StarRating({ rating }: { rating: number }) {
   return (
     <div className="flex items-center gap-1 text-amber-300">
@@ -547,7 +481,7 @@ function SectionCard({
   className?: string;
 }) {
   return (
-    <section className={`rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(15,19,29,0.92),rgba(8,11,17,0.96))] p-5 shadow-[0_26px_80px_rgba(0,0,0,0.42)] md:p-6 ${className}`}>
+    <section className={`rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(15,19,29,0.92),rgba(8,11,17,0.96))] p-5 shadow-[0_18px_48px_rgba(0,0,0,0.34)] md:p-6 ${className}`}>
       <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           {eyebrow ? <p className="text-[11px] uppercase tracking-[0.34em] text-cyan-200/65">{eyebrow}</p> : null}
@@ -572,118 +506,11 @@ function StatTile({
   accent: string;
 }) {
   return (
-    <div className="relative overflow-hidden rounded-[28px] border border-white/10 bg-white/[0.04] p-5 backdrop-blur-sm">
+    <div className="relative overflow-hidden rounded-[28px] border border-white/10 bg-white/[0.04] p-5">
       <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${accent}`} />
       <p className="text-[11px] uppercase tracking-[0.28em] text-slate-400">{label}</p>
       <p className="mt-4 font-display text-3xl font-semibold text-white">{value}</p>
       <p className="mt-2 text-sm text-slate-300">{hint}</p>
-    </div>
-  );
-}
-
-function InlineEdit({
-  value,
-  onSave,
-  type = "text",
-  options,
-  formatType = "none",
-}: {
-  value: string | number;
-  onSave: (val: string) => void;
-  type?: "text" | "number" | "select" | "textarea" | "datetime-local" | "date";
-  options?: string[];
-  formatType?: "currency" | "percent" | "none";
-}) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [editValue, setEditValue] = useState(String(value));
-
-  const handleBlur = () => {
-    setIsEditing(false);
-    if (editValue !== String(value)) {
-      onSave(editValue);
-    }
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter" && type !== "textarea") {
-      handleBlur();
-    }
-    if (e.key === "Escape") {
-      setEditValue(String(value));
-      setIsEditing(false);
-    }
-  };
-
-  if (isEditing) {
-    if (type === "select" && options) {
-      return (
-        <select
-          autoFocus
-          value={editValue}
-          onChange={(e) => setEditValue(e.target.value)}
-          onBlur={handleBlur}
-          className="w-full bg-slate-900 text-white border border-cyan-500 rounded px-1 outline-none text-right"
-        >
-          {options.map((opt) => (
-            <option key={opt} value={opt}>
-              {opt}
-            </option>
-          ))}
-        </select>
-      );
-    }
-
-    if (type === "textarea") {
-      return (
-        <textarea
-          autoFocus
-          value={editValue}
-          onChange={(e) => setEditValue(e.target.value)}
-          onBlur={handleBlur}
-          onKeyDown={handleKeyDown}
-          className="w-full bg-slate-900 text-white border border-cyan-500 rounded p-2 outline-none min-h-[100px] text-left"
-        />
-      );
-    }
-
-    return (
-      <input
-        autoFocus
-        type={type}
-        step="any"
-        value={editValue}
-        onChange={(e) => setEditValue(e.target.value)}
-        onBlur={handleBlur}
-        onKeyDown={handleKeyDown}
-        className="w-full bg-slate-900 text-white border border-cyan-500 rounded px-1 outline-none text-right"
-      />
-    );
-  }
-
-  let displayValue = String(value);
-  if (formatType === "currency") {
-    displayValue = formatCurrency(Number(value) || 0);
-  } else if (formatType === "percent") {
-    displayValue = formatPercent(Number(value) || 0);
-  } else if (type === "datetime-local" || type === "date") {
-    displayValue = new Date(String(value)).toLocaleString("en-US", { 
-      timeZone: EST_TIMEZONE,
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true
-    }) + " ET";
-  }
-
-  return (
-    <div
-      onClick={() => setIsEditing(true)}
-      className="cursor-pointer hover:bg-white/5 rounded px-1 -mx-1 transition min-h-[1.5em] flex items-center justify-end"
-      title="Click to edit"
-    >
-      {displayValue}
     </div>
   );
 }
@@ -720,15 +547,16 @@ function SelectField({
 import {
   Area,
   AreaChart,
+  Bar,
+  BarChart,
   Cell,
+  Pie,
+  PieChart,
   ResponsiveContainer,
-  Scatter,
-  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
-  ZAxis,
-  CartesianGrid,
+  Legend,
 } from "recharts";
 
 function MiniLineChart({ data }: { data: { label: string; value: number }[] }) {
@@ -746,95 +574,59 @@ function MiniLineChart({ data }: { data: { label: string; value: number }[] }) {
   const minValue = Math.min(...data.map((d) => d.value), 0);
   const maxValue = Math.max(...data.map((d) => d.value), 0);
 
-  // Handle touch events
-  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const chartContainer = e.currentTarget.querySelector('.recharts-wrapper');
-    if (!chartContainer) return;
-
-    const rect = chartContainer.getBoundingClientRect();
-    const touch = e.touches[0];
-    const x = touch.clientX - rect.left;
-    
-    // Calculate which data point is closest
-    const chartWidth = rect.width;
-    const index = Math.round((x / chartWidth) * (data.length - 1));
-    const clampedIndex = Math.max(0, Math.min(index, data.length - 1));
-    
-    setActivePoint(data[clampedIndex]);
-  };
-
-  const handleTouchEnd = () => {
-    // Keep the point visible for a moment, then clear
-    setTimeout(() => setActivePoint(null), 3000);
-  };
-
-  const handleClick = (e: any) => {
-    if (e && e.activeLabel && e.activePayload && e.activePayload.length > 0) {
+  const handleChartMove = (state: any) => {
+    if (state?.activeLabel && state?.activePayload?.length) {
       setActivePoint({
-        label: e.activeLabel,
-        value: e.activePayload[0].value
+        label: state.activeLabel,
+        value: Number(state.activePayload[0].value ?? 0),
       });
     }
+  };
+
+  const handleChartLeave = () => {
+    setActivePoint(null);
   };
 
   return (
     <div className="space-y-4">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <p className="text-xs uppercase tracking-[0.26em] text-slate-400">
-            Equity curve
-          </p>
+          <p className="text-xs uppercase tracking-[0.26em] text-slate-400">Equity curve</p>
           <p className="mt-2 font-display text-3xl text-white">
             {formatCurrency(activePoint ? activePoint.value : lastValue)}
           </p>
-          {activePoint && (
-            <p className="mt-1 text-sm text-cyan-300">
-              {activePoint.label}
-            </p>
-          )}
+          {activePoint ? <p className="mt-1 text-sm text-cyan-300">{activePoint.label}</p> : null}
         </div>
-        <p className="text-sm text-slate-300">
-          Running account balance based on recorded trades
-        </p>
+        <p className="text-sm text-slate-300">Running account balance based on recorded trades</p>
       </div>
-      
-      <div 
-        className="relative h-64 overflow-hidden rounded-[24px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.1),transparent_50%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] p-4 pt-6"
-        onTouchMove={handleTouchMove}
-        onTouchEnd={handleTouchEnd}
-        onTouchStart={handleTouchMove}
-      >
+
+      <div className="chart-shell relative h-64 overflow-hidden rounded-[24px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_50%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] p-4 pt-6">
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart 
+          <AreaChart
             data={data}
-            onClick={handleClick}
             margin={{ top: 20, right: 20, left: 0, bottom: 0 }}
+            onMouseMove={handleChartMove}
+            onMouseLeave={handleChartLeave}
+            onTouchMove={handleChartMove}
+            onTouchEnd={handleChartLeave}
           >
             <defs>
               <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.3} />
+                <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.24} />
                 <stop offset="95%" stopColor="#22d3ee" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <XAxis
-              dataKey="label"
-              hide={true}
-            />
-            <YAxis hide={true} domain={[minValue, maxValue]} />
+            <XAxis dataKey="label" hide />
+            <YAxis hide domain={[minValue, maxValue]} />
             <Tooltip
+              isAnimationActive={false}
               content={({ active, payload, label }) => {
                 if (active && payload && payload.length) {
                   return (
-                    <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
-                      <p className="text-xs font-medium text-slate-400 mb-1">
-                        {label}
-                      </p>
+                    <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-lg">
+                      <p className="mb-1 text-xs font-medium text-slate-400">{label}</p>
                       <p className="font-display text-lg font-semibold text-white">
                         {formatCurrency(payload[0].value as number)}
-                      </p>
-                      <p className="text-xs text-cyan-300 mt-1">
-                        Tap to lock value
                       </p>
                     </div>
                   );
@@ -846,47 +638,24 @@ function MiniLineChart({ data }: { data: { label: string; value: number }[] }) {
               type="monotone"
               dataKey="value"
               stroke="#22d3ee"
-              strokeWidth={3}
+              strokeWidth={2.5}
               fillOpacity={1}
               fill="url(#colorValue)"
+              isAnimationActive={false}
               activeDot={{
-                r: 8,
+                r: 6,
                 fill: "#f59e0b",
                 stroke: "#0f172a",
-                strokeWidth: 3,
-                onClick: (e: any) => {
-                  if (e && e.payload) {
-                    setActivePoint({ label: e.payload.label, value: e.payload.value });
-                  }
-                }
+                strokeWidth: 2,
               }}
-              dot={(props: any) => {
-                const isActive = activePoint && activePoint.label === props.payload.label;
-                if (isActive) {
-                  return (
-                    <circle 
-                      cx={props.cx} 
-                      cy={props.cy} 
-                      r={8} 
-                      fill="#f59e0b" 
-                      stroke="#0f172a" 
-                      strokeWidth={3}
-                    />
-                  );
-                }
-                return null;
-              }}
+              dot={false}
             />
           </AreaChart>
         </ResponsiveContainer>
-        
-        <div className="absolute bottom-2 left-4 right-4 flex justify-between items-center">
-          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500 opacity-60">
-            {data[0]?.label}
-          </span>
-          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500 opacity-60">
-            {data[data.length - 1]?.label}
-          </span>
+
+        <div className="pointer-events-none absolute bottom-2 left-4 right-4 flex items-center justify-between">
+          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500 opacity-60">{data[0]?.label}</span>
+          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500 opacity-60">{data[data.length - 1]?.label}</span>
         </div>
       </div>
     </div>
@@ -1075,129 +844,9 @@ function WeekdayPerformanceChart({ data }: { data: { day: string; value: number;
   );
 }
 
-function DrawdownChart({ data }: { data: { label: string; value: number }[] }) {
-  if (data.length === 0) return null;
-  const minValue = Math.min(...data.map(d => d.value), 0);
-
-  return (
-    <div className="h-64 relative overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.02]">
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-          <defs>
-            <linearGradient id="colorDrawdown" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#fb7185" stopOpacity={0.4}/>
-              <stop offset="95%" stopColor="#fb7185" stopOpacity={0}/>
-            </linearGradient>
-          </defs>
-          <XAxis dataKey="label" hide />
-          <YAxis hide domain={[minValue * 1.1, 0]} />
-          <Tooltip 
-            content={({ active, payload, label }) => {
-              if (active && payload && payload.length) {
-                return (
-                  <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
-                    <p className="text-[10px] uppercase tracking-widest text-slate-500">{label}</p>
-                    <p className="text-lg font-semibold text-rose-300">{formatCurrency(payload[0].value as number)}</p>
-                  </div>
-                );
-              }
-              return null;
-            }}
-          />
-          <Area type="monotone" dataKey="value" stroke="#fb7185" strokeWidth={2} fill="url(#colorDrawdown)" />
-        </AreaChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function AssetProfitChart({ data }: { data: { asset: string; value: number }[] }) {
-  if (data.length === 0) return null;
-  const maxValue = Math.max(...data.map(d => Math.abs(d.value)), 1);
-
-  return (
-    <div className="space-y-4 h-64 overflow-y-auto pr-2 custom-scrollbar">
-      {data.map((item) => (
-        <div key={item.asset} className="space-y-1">
-          <div className="flex justify-between text-xs">
-            <span className="text-slate-300 font-medium">{item.asset}</span>
-            <span className={item.value >= 0 ? "text-emerald-400" : "text-rose-400"}>{formatCurrency(item.value)}</span>
-          </div>
-          <div className="h-2 w-full bg-white/[0.05] rounded-full overflow-hidden">
-             <div 
-               className={`h-full rounded-full ${item.value >= 0 ? "bg-emerald-400" : "bg-rose-400"}`}
-               style={{ width: `${(Math.abs(item.value) / maxValue) * 100}%` }}
-             />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function DurationScatterChart({ data }: { data: { duration: number; pnl: number; asset: string; outcome: Outcome }[] }) {
-  if (data.length === 0) return null;
-
-  return (
-    <div className="h-64 relative overflow-hidden rounded-[24px] border border-white/10 bg-white/[0.02] p-4">
-      <ResponsiveContainer width="100%" height="100%">
-        <ScatterChart margin={{ top: 20, right: 20, bottom: 20, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" vertical={false} />
-          <XAxis 
-            type="number" 
-            dataKey="duration" 
-            name="Duration" 
-            unit="m" 
-            stroke="#94a3b8" 
-            fontSize={10} 
-            tickLine={false}
-            axisLine={false}
-          />
-          <YAxis 
-            type="number" 
-            dataKey="pnl" 
-            name="P/L" 
-            unit="$" 
-            stroke="#94a3b8" 
-            fontSize={10} 
-            tickLine={false}
-            axisLine={false}
-          />
-          <ZAxis type="number" range={[50, 400]} />
-          <Tooltip 
-            cursor={{ strokeDasharray: '3 3' }} 
-            content={({ active, payload }) => {
-              if (active && payload && payload.length) {
-                const item = payload[0].payload;
-                return (
-                  <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md text-xs">
-                    <p className="font-bold text-white mb-1">{item.asset}</p>
-                    <p className="text-slate-400">Duration: {Math.round(item.duration)}m</p>
-                    <p className={item.pnl >= 0 ? "text-emerald-400" : "text-rose-400"}>P/L: {formatCurrency(item.pnl)}</p>
-                  </div>
-                );
-              }
-              return null;
-            }}
-          />
-          <Scatter name="Trades" data={data}>
-            {data.map((entry, index) => (
-              <Cell 
-                key={`cell-${index}`} 
-                fill={entry.outcome === 'Win' ? '#34d399' : entry.outcome === 'Loss' ? '#fb7185' : '#94a3b8'} 
-                fillOpacity={0.6}
-              />
-            ))}
-          </Scatter>
-        </ScatterChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
 function TradingCalendar({ trades }: { trades: Trade[] }) {
   const [currentMonth, setCurrentMonth] = useState(new Date());
-  
+
   const getDaysInMonth = (date: Date) => {
     const year = date.getFullYear();
     const month = date.getMonth();
@@ -1205,63 +854,69 @@ function TradingCalendar({ trades }: { trades: Trade[] }) {
     const lastDay = new Date(year, month + 1, 0);
     const daysInMonth = lastDay.getDate();
     const startingDay = firstDay.getDay();
-    
+
     return { daysInMonth, startingDay, year, month };
   };
-  
+
   const { daysInMonth, startingDay, year, month } = getDaysInMonth(currentMonth);
-  
+
+  const dayMap = useMemo(() => {
+    return trades.reduce<Record<string, { count: number; pnl: number }>>((acc, trade) => {
+      const d = new Date(trade.startDate);
+      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+      if (!acc[key]) {
+        acc[key] = { count: 0, pnl: 0 };
+      }
+      acc[key].count += 1;
+      acc[key].pnl += trade.pnl;
+      return acc;
+    }, {});
+  }, [trades]);
+
   const getDayData = (day: number) => {
-    const dateStr = new Date(year, month, day).toDateString();
-    const dayTrades = trades.filter(t => new Date(t.startDate).toDateString() === dateStr);
-    const totalPnl = dayTrades.reduce((sum, t) => sum + t.pnl, 0);
-    return { count: dayTrades.length, pnl: totalPnl };
+    return dayMap[`${year}-${month}-${day}`] ?? { count: 0, pnl: 0 };
   };
-  
+
   const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-  
+
   const prevMonth = () => setCurrentMonth(new Date(year, month - 1, 1));
   const nextMonth = () => setCurrentMonth(new Date(year, month + 1, 1));
-  
+
   const days = [];
   for (let i = 0; i < startingDay; i++) {
     days.push(<div key={`empty-${i}`} className="h-20 rounded-[12px] bg-white/[0.02]" />);
   }
-  
+
   for (let day = 1; day <= daysInMonth; day++) {
     const { count, pnl } = getDayData(day);
     const hasTrades = count > 0;
-    
+
     days.push(
-      <div 
-        key={day} 
-        className={`h-20 rounded-[12px] border p-2 transition ${
-          hasTrades 
-            ? pnl >= 0 
-              ? "border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20" 
-              : "border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20"
-            : "border-white/5 bg-white/[0.02] hover:bg-white/[0.04]"
+      <div
+        key={day}
+        className={`h-20 rounded-[12px] border p-2 transition-colors ${
+          hasTrades
+            ? pnl >= 0
+              ? "border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/15"
+              : "border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/15"
+            : "border-white/5 bg-white/[0.02] hover:bg-white/[0.035]"
         }`}
       >
-        <div className="flex justify-between items-start">
+        <div className="flex items-start justify-between">
           <span className="text-sm font-medium text-slate-300">{day}</span>
-          {hasTrades && (
-            <span className={`text-xs font-bold ${pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
-              {count}
-            </span>
-          )}
+          {hasTrades ? <span className={`text-xs font-bold ${pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{count}</span> : null}
         </div>
-        {hasTrades && (
+        {hasTrades ? (
           <div className="mt-2">
             <p className={`text-xs font-semibold ${pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
               {formatCurrency(pnl)}
             </p>
           </div>
-        )}
+        ) : null}
       </div>
     );
   }
-  
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
@@ -1303,6 +958,213 @@ function TradingCalendar({ trades }: { trades: Trade[] }) {
           <span>No trades</span>
         </div>
       </div>
+    </div>
+  );
+}
+
+function AdvancedPieChart({ data }: { data: { name: string; value: number; color: string }[] }) {
+  if (data.reduce((sum, item) => sum + item.value, 0) === 0) {
+    return <div className="flex h-64 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">No data available</div>;
+  }
+
+  const COLORS = data.map(d => d.color);
+
+  return (
+    <div className="h-64">
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie
+            data={data}
+            cx="50%"
+            cy="50%"
+            innerRadius={60}
+            outerRadius={80}
+            paddingAngle={5}
+            dataKey="value"
+            stroke="none"
+          >
+            {data.map((_, index) => (
+              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+            ))}
+          </Pie>
+          <Tooltip
+            content={({ active, payload }) => {
+              if (active && payload && payload.length) {
+                const data = payload[0].payload as { name: string; value: number };
+                const total = data.value;
+                return (
+                  <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
+                    <p className="text-sm font-medium text-white">{data.name}</p>
+                    <p className="text-lg font-semibold text-cyan-300">{total} trades</p>
+                  </div>
+                );
+              }
+              return null;
+            }}
+          />
+          <Legend 
+            verticalAlign="bottom" 
+            height={36}
+            formatter={(value) => <span className="text-sm text-slate-300">{value}</span>}
+          />
+        </PieChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function AdvancedBarChart({ data }: { data: { name: string; value: number }[] }) {
+  if (data.length === 0) {
+    return <div className="flex h-64 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">No data available</div>;
+  }
+
+  return (
+    <div className="h-64">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
+          <XAxis 
+            dataKey="name" 
+            tick={{ fill: '#94a3b8', fontSize: 12 }}
+            axisLine={false}
+            tickLine={false}
+          />
+          <YAxis 
+            hide={true}
+          />
+          <Tooltip
+            content={({ active, payload, label }) => {
+              if (active && payload && payload.length) {
+                const value = payload[0].value as number;
+                return (
+                  <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
+                    <p className="text-xs text-slate-400 mb-1">{label}</p>
+                    <p className={`text-lg font-semibold ${value >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                      {formatCurrency(value)}
+                    </p>
+                  </div>
+                );
+              }
+              return null;
+            }}
+          />
+          <Bar 
+            dataKey="value" 
+            radius={[8, 8, 0, 0]}
+          >
+            {data.map((entry, index) => (
+              <Cell 
+                key={`cell-${index}`} 
+                fill={entry.value >= 0 ? '#10b981' : '#ef4444'}
+              />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function DirectionDonutChart({ trades }: { trades: Trade[] }) {
+  const longTrades = trades.filter(t => t.direction === 'LONG');
+  const shortTrades = trades.filter(t => t.direction === 'SHORT');
+  
+  const longPnL = longTrades.reduce((sum, t) => sum + t.pnl, 0);
+  const shortPnL = shortTrades.reduce((sum, t) => sum + t.pnl, 0);
+  
+  const data = [
+    { name: 'LONG', value: Math.abs(longPnL), color: longPnL >= 0 ? '#10b981' : '#ef4444', pnl: longPnL },
+    { name: 'SHORT', value: Math.abs(shortPnL), color: shortPnL >= 0 ? '#10b981' : '#ef4444', pnl: shortPnL },
+  ].filter(d => d.value > 0);
+
+  if (data.length === 0) {
+    return <div className="flex h-64 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">No trades yet</div>;
+  }
+
+  return (
+    <div className="h-64">
+      <ResponsiveContainer width="100%" height="100%">
+        <PieChart>
+          <Pie
+            data={data}
+            cx="50%"
+            cy="50%"
+            innerRadius={70}
+            outerRadius={90}
+            paddingAngle={5}
+            dataKey="value"
+            stroke="none"
+          >
+            {data.map((entry, index) => (
+              <Cell key={`cell-${index}`} fill={entry.color} />
+            ))}
+          </Pie>
+          <Tooltip
+            content={({ active, payload }) => {
+              if (active && payload && payload.length) {
+                const d = payload[0].payload as typeof data[0];
+                return (
+                  <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
+                    <p className="text-sm font-medium text-white">{d.name}</p>
+                    <p className={`text-lg font-semibold ${d.pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                      {formatCurrency(d.pnl)}
+                    </p>
+                  </div>
+                );
+              }
+              return null;
+            }}
+          />
+          <Legend 
+            verticalAlign="bottom" 
+            height={36}
+            formatter={(value) => <span className="text-sm text-slate-300">{value}</span>}
+          />
+        </PieChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+function AssetHeatmap({ trades }: { trades: Trade[] }) {
+  const assetData = trades.reduce((acc, trade) => {
+    if (!acc[trade.asset]) acc[trade.asset] = { pnl: 0, count: 0, wins: 0 };
+    acc[trade.asset].pnl += trade.pnl;
+    acc[trade.asset].count += 1;
+    if (trade.outcome === 'Win') acc[trade.asset].wins += 1;
+    return acc;
+  }, {} as Record<string, { pnl: number; count: number; wins: number }>);
+  
+  const data = Object.entries(assetData)
+    .map(([name, data]) => ({ name, ...data }))
+    .sort((a, b) => b.pnl - a.pnl);
+
+  if (data.length === 0) {
+    return <div className="flex h-64 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">No asset data</div>;
+  }
+
+  const maxPnl = Math.max(...data.map(d => Math.abs(d.pnl)), 1);
+
+  return (
+    <div className="space-y-3">
+      {data.map((d, i) => (
+        <div key={i} className="group">
+          <div className="flex items-center justify-between mb-1">
+            <span className="text-sm font-medium text-white">{d.name}</span>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-slate-400">{d.count} trades</span>
+              <span className={`text-sm font-semibold ${d.pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
+                {formatCurrency(d.pnl)}
+              </span>
+            </div>
+          </div>
+          <div className="h-3 bg-gray-800 rounded-full overflow-hidden">
+            <div 
+              className={`h-full rounded-full transition-all duration-500 ${d.pnl >= 0 ? 'bg-gradient-to-r from-emerald-600 to-emerald-400' : 'bg-gradient-to-r from-rose-600 to-rose-400'}`}
+              style={{ width: `${(Math.abs(d.pnl) / maxPnl) * 100}%` }}
+            />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1380,28 +1242,416 @@ function AdvancedMetrics({ trades }: { trades: Trade[] }) {
   );
 }
 
-function App() {
-
-const [session, setSession] = useState(null);
-
-useEffect(() => {
-  supabase.auth.getSession().then(({ data }) => {
-    setSession(data.session);
-  });
-
-  const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
-    setSession(session);
-  });
-
-  return () => {
-    listener.subscription.unsubscribe();
-  };
-}, []);
+function InlineEditable({
+  value,
+  type = "text",
+  onChange,
+  className = "",
+  placeholder = "",
+  enabled = true,
+}: {
+  value: string | number;
+  type?: "text" | "number" | "datetime-local";
+  onChange: (value: string) => void;
+  className?: string;
+  placeholder?: string;
+  enabled?: boolean;
+}) {
+  const [isEditing, setIsEditing] = useState(false);
+  const [localValue, setLocalValue] = useState(String(value));
+  const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    iconifyEditDeleteButtons();
-  });
+    if (isEditing && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [isEditing]);
 
+  useEffect(() => {
+    setLocalValue(String(value));
+  }, [value]);
+
+  const handleSave = () => {
+    setIsEditing(false);
+    onChange(localValue);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleSave();
+    } else if (e.key === "Escape") {
+      setLocalValue(String(value));
+      setIsEditing(false);
+    }
+  };
+
+  if (isEditing && enabled) {
+    return (
+      <input
+        ref={inputRef}
+        type={type}
+        value={localValue}
+        onChange={(e) => setLocalValue(e.target.value)}
+        onBlur={handleSave}
+        onKeyDown={handleKeyDown}
+        className={`w-full bg-transparent border-b border-cyan-400/50 outline-none text-white ${className}`}
+        placeholder={placeholder}
+      />
+    );
+  }
+
+  return (
+    <div
+      onClick={() => enabled && setIsEditing(true)}
+      className={`${enabled ? "cursor-pointer hover:bg-white/5 rounded px-1 -mx-1" : ""} transition ${className}`}
+      title={enabled ? "Click to edit" : ""}
+    >
+      {value}
+    </div>
+  );
+}
+
+function TradeDetailSection({
+  trade,
+  currentUser,
+  setUsers,
+  setView,
+  setSelectedTradeId,
+}: {
+  trade: Trade;
+  currentUser: UserAccount;
+  setUsers: React.Dispatch<React.SetStateAction<UserAccount[]>>;
+  setView: (view: View) => void;
+  setSelectedTradeId: (id: string | null) => void;
+}) {
+  const [isEditMode, setIsEditMode] = useState(false);
+  
+  const updateTrade = (updates: Partial<Trade>) => {
+    setUsers((previousUsers) =>
+      previousUsers.map((user) => {
+        if (user.id !== currentUser.id) {
+          return user;
+        }
+        return {
+          ...user,
+          trades: user.trades.map((t) =>
+            t.id === trade.id ? { ...t, ...updates } : t
+          ),
+        };
+      })
+    );
+  };
+
+  const handlePnlChange = (value: string) => {
+    const numValue = Number(value);
+    if (!isNaN(numValue)) {
+      updateTrade({ pnl: numValue });
+    }
+  };
+
+  const handleRoiChange = (value: string) => {
+    const numValue = Number(value);
+    if (!isNaN(numValue)) {
+      updateTrade({ roi: Number(numValue.toFixed(2)) });
+    }
+  };
+
+  const handleLotSizeChange = (value: string) => {
+    const numValue = Number(value);
+    if (!isNaN(numValue) || value === "") {
+      updateTrade({ lotSize: numValue || 0 });
+    }
+  };
+
+  const handleOutcomeChange = (value: string) => {
+    const outcome = value as Outcome;
+    const newPnl = outcome === "Loss" && trade.pnl > 0 ? -trade.pnl : outcome === "Win" && trade.pnl < 0 ? Math.abs(trade.pnl) : trade.pnl;
+    updateTrade({ outcome, pnl: newPnl });
+  };
+
+  const handleRuleFollowedChange = (value: string) => {
+    updateTrade({ ruleFollowed: value === "YES" });
+  };
+
+  const handleDirectionChange = (value: string) => {
+    updateTrade({ direction: value as Direction });
+  };
+
+  const handleTypeChange = (value: string) => {
+    updateTrade({ type: value as TradeType });
+  };
+
+  const handleEmotionChange = (value: string) => {
+    updateTrade({ emotion: value });
+  };
+
+  const handleRatingChange = (value: number) => {
+    updateTrade({ rating: value });
+  };
+
+  const handleNotesChange = (value: string) => {
+    updateTrade({ notes: value });
+  };
+
+  const handleMistakesChange = (value: string) => {
+    updateTrade({ mistakes: value });
+  };
+
+  const handleLessonsChange = (value: string) => {
+    updateTrade({ lessons: value });
+  };
+
+  const handleStartDateChange = (value: string) => {
+    updateTrade({ startDate: value, endDate: value });
+  };
+
+  const handleEndDateChange = (value: string) => {
+    updateTrade({ endDate: value });
+  };
+
+  const handleDelete = () => {
+    const shouldDelete = window.confirm("Delete this trade permanently?");
+    if (!shouldDelete) {
+      return;
+    }
+    setUsers((previousUsers) =>
+      previousUsers.map((user) => {
+        if (user.id !== currentUser.id) {
+          return user;
+        }
+        return {
+          ...user,
+          trades: user.trades.filter((t) => t.id !== trade.id),
+        };
+      })
+    );
+    setSelectedTradeId(null);
+    setView("dashboard");
+  };
+
+  return (
+    <SectionCard
+      title={`${trade.asset} Trade Review`}
+      eyebrow="Trade detail page"
+      action={
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setIsEditMode(!isEditMode)}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-cyan-400/30 bg-cyan-400/10 text-cyan-200 transition hover:bg-cyan-400/20"
+            aria-label={isEditMode ? "Stop editing" : "Edit trade"}
+            title={isEditMode ? "Stop editing" : "Edit trade"}
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M4 20h4l10-10-4-4L4 16v4z" />
+              <path d="M13 7l4 4" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            onClick={handleDelete}
+            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-rose-400/30 bg-rose-400/10 text-rose-200 transition hover:bg-rose-400/20"
+            aria-label="Delete trade"
+            title="Delete trade"
+          >
+            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+              <path d="M4 7h16" />
+              <path d="M9 7V5h6v2" />
+              <path d="M7 7l1 13h8l1-13" />
+              <path d="M10 11v6M14 11v6" />
+            </svg>
+          </button>
+          <button type="button" onClick={() => setView("dashboard")} className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-100 transition hover:bg-white/[0.08]">
+            Back to Journal
+          </button>
+        </div>
+      }
+    >
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <StatTile label="Trade Window" value={formatEST(trade.startDate, { month: "short", day: "numeric" })} hint={formatESTRange(trade.startDate, trade.endDate)} accent="from-cyan-400 via-sky-400 to-cyan-200" />
+        <StatTile label="Outcome" value={trade.outcome} hint={`${trade.direction} on ${trade.timeframe}`} accent="from-emerald-400 via-cyan-300 to-sky-300" />
+        <StatTile label="P/L" value={formatCurrency(trade.pnl)} hint={`ROI ${formatPercent(trade.roi)}`} accent="from-amber-400 via-orange-400 to-rose-400" />
+        <StatTile label="Emotion" value={trade.emotion} hint={`Rating: ${trade.rating}/5`} accent="from-fuchsia-400 via-cyan-300 to-emerald-300" />
+      </div>
+
+      <div className="mt-6 grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+        <div className="space-y-4 rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
+              <div className="grid gap-4 md:grid-cols-2">
+            <div>
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-3">Execution</p>
+              <div className="space-y-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">Start Date/Time</span>
+                  <InlineEditable value={trade.startDate} type="datetime-local" onChange={handleStartDateChange} className="text-white text-right" enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">End Date/Time</span>
+                  <InlineEditable value={trade.endDate} type="datetime-local" onChange={handleEndDateChange} className="text-white text-right" enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">Lot Size</span>
+                  <InlineEditable value={trade.lotSize || ""} type="number" onChange={handleLotSizeChange} className="text-white text-right" placeholder="0" enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">Type</span>
+                  <InlineEditable value={trade.type} onChange={handleTypeChange} className="text-white text-right" enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">P&L</span>
+                  <InlineEditable value={trade.pnl} type="number" onChange={handlePnlChange} className={`${trade.pnl >= 0 ? "text-emerald-300" : "text-rose-300"} text-right`} enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">ROI</span>
+                  <InlineEditable value={trade.roi} type="number" onChange={handleRoiChange} className={`${trade.roi >= 0 ? "text-emerald-300" : "text-rose-300"} text-right`} enabled={isEditMode} />
+                </div>
+              </div>
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-3">Discipline</p>
+              <div className="space-y-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">Rule Followed</span>
+                  <InlineEditable value={trade.ruleFollowed ? "YES" : "NO"} onChange={handleRuleFollowedChange} className="text-white text-right" enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">Direction</span>
+                  <InlineEditable value={trade.direction} onChange={handleDirectionChange} className="text-white text-right" enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">Outcome</span>
+                  <InlineEditable value={trade.outcome} onChange={handleOutcomeChange} className="text-white text-right" enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="text-slate-300">Emotion</span>
+                  <InlineEditable value={trade.emotion} onChange={handleEmotionChange} className="text-white text-right" enabled={isEditMode} />
+                </div>
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-slate-300">Rating</span>
+                  <div className="flex gap-1">
+                    {Array.from({ length: 5 }, (_, i) => (
+                      <button
+                        key={i}
+                        onClick={() => isEditMode && handleRatingChange(i + 1)}
+                        className={`transition ${isEditMode ? "hover:scale-110" : "cursor-default"}`}
+                        disabled={!isEditMode}
+                      >
+                        <svg
+                          viewBox="0 0 20 20"
+                          fill={i < trade.rating ? "currentColor" : "none"}
+                          className={`h-4 w-4 ${i < trade.rating ? "text-amber-300" : "text-slate-600"}`}
+                          stroke="currentColor"
+                          strokeWidth="1.25"
+                        >
+                          <path d="M10 1.8l2.52 5.11 5.64.82-4.08 3.97.96 5.61L10 14.64 4.96 17.3l.96-5.61L1.84 7.73l5.64-.82L10 1.8z" />
+                        </svg>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid gap-4">
+            <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-2">Notes {isEditMode ? "(click to edit)" : ""}</p>
+              <InlineEditable value={trade.notes} onChange={handleNotesChange} className="text-sm leading-7 text-slate-300 w-full" placeholder="No notes recorded." enabled={isEditMode} />
+            </div>
+            <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-2">Mistakes {isEditMode ? "(click to edit)" : ""}</p>
+              <InlineEditable value={trade.mistakes} onChange={handleMistakesChange} className="text-sm leading-7 text-slate-300 w-full" placeholder="No mistakes recorded." enabled={isEditMode} />
+            </div>
+            <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
+              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-2">Lessons Learned {isEditMode ? "(click to edit)" : ""}</p>
+              <InlineEditable value={trade.lessons} onChange={handleLessonsChange} className="text-sm leading-7 text-slate-300 w-full" placeholder="No lessons recorded." enabled={isEditMode} />
+            </div>
+          </div>
+        </div>
+
+        <div className="space-y-4">
+          {([
+            ["entry", "Entry charts"],
+            ["exit", "Exit charts"],
+            ["review", "Review screenshots"],
+          ] as [ScreenshotCategory, string][]).map(([category, title]) => (
+            <div key={category} className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
+              <div className="flex items-center justify-between gap-4 mb-4">
+                <div>
+                  <p className="font-medium text-white">{title}</p>
+                  <p className="mt-1 text-xs uppercase tracking-[0.22em] text-slate-500">{trade.screenshots[category].length} images</p>
+                </div>
+                <label className="inline-flex cursor-pointer rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-slate-200 transition hover:bg-white/[0.08]">
+                  Upload
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={async (e) => {
+                      const images = await toDataUrls(e.target.files);
+                      if (images.length > 0) {
+                        setUsers((previousUsers) =>
+                          previousUsers.map((user) => {
+                            if (user.id !== currentUser.id) return user;
+                            return {
+                              ...user,
+                              trades: user.trades.map((t) =>
+                                t.id === trade.id
+                                  ? { ...t, screenshots: { ...t.screenshots, [category]: [...t.screenshots[category], ...images] } }
+                                  : t
+                              ),
+                            };
+                          })
+                        );
+                      }
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {trade.screenshots[category].length === 0 ? (
+                  <div className="rounded-[20px] border border-dashed border-white/10 bg-black/20 px-4 py-12 text-center text-sm text-slate-500 sm:col-span-2">
+                    No images uploaded for this section.
+                  </div>
+                ) : (
+                  trade.screenshots[category].map((image, index) => (
+                    <div key={`${category}-${index}`} className="group relative overflow-hidden rounded-[20px] border border-white/10 bg-slate-950/60">
+                      <img src={image} alt={`${title} ${index + 1}`} className="h-48 w-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setUsers((previousUsers) =>
+                            previousUsers.map((user) => {
+                              if (user.id !== currentUser.id) return user;
+                              return {
+                                ...user,
+                                trades: user.trades.map((t) =>
+                                  t.id === trade.id
+                                    ? { ...t, screenshots: { ...t.screenshots, [category]: t.screenshots[category].filter((_, i) => i !== index) } }
+                                    : t
+                                ),
+                              };
+                            })
+                          );
+                        }}
+                        className="absolute right-3 top-3 rounded-full bg-black/60 px-3 py-1 text-xs text-white opacity-0 transition group-hover:opacity-100"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </SectionCard>
+  );
+}
+
+function App() {
   const [users, setUsers] = useState<UserAccount[]>(() => loadUsers());
   const [sessionUserId, setSessionUserId] = useState<string | null>(() => readLocalStorage(SESSION_STORAGE));
   const [authMode, setAuthMode] = useState<AuthMode>("login");
@@ -1472,27 +1722,16 @@ useEffect(() => {
   );
 
   const journalRows = useMemo(() => {
-    const sorted = [...filteredTrades].sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
+    const ascending = [...filteredTrades].sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
     let runningTotal = 0;
 
-    // Calculate daily totals map
-    const dailyTotalsMap: Record<string, number> = {};
-    sorted.forEach((trade) => {
-      const day = getESTDate(trade.startDate);
-      dailyTotalsMap[day] = (dailyTotalsMap[day] ?? 0) + trade.pnl;
-    });
-
-    return sorted
+    return ascending
       .map((trade) => {
         runningTotal += trade.pnl;
-        return {
-          trade,
-          runningTotal,
-          dailyTotal: dailyTotalsMap[getESTDate(trade.startDate)] || 0,
-        };
+        return { trade, runningTotal };
       })
       .reverse();
-  }, [filteredTrades, getESTDate]);
+  }, [filteredTrades]);
 
   const allAnalytics = useMemo(() => buildTradeAnalytics(trades), [trades]);
   const filteredAnalytics = useMemo(() => buildTradeAnalytics(filteredTrades), [filteredTrades]);
@@ -1500,41 +1739,94 @@ useEffect(() => {
 
 
   async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
-  event.preventDefault();
-  setAuthError("");
-  setAuthBusy(true);
+    event.preventDefault();
+    setAuthError("");
+    setAuthBusy(true);
 
-  const email = authForm.email.trim();
-  const password = authForm.password.trim();
+    try {
+      const email = authForm.email.trim().toLowerCase();
+      const password = authForm.password.trim();
+      const name = authForm.name.trim();
 
-  try {
-    if (authMode === "signup") {
+      if (!email || !password || (authMode === "signup" && !name)) {
+        setAuthError("Complete the form to access your private journal.");
+        return;
+      }
 
-      const { error } = await supabase.auth.signUp({
-        email,
-        password,
-      });
+      if (password.length < 6) {
+        setAuthError("Use at least 6 characters for your password.");
+        return;
+      }
 
-      if (error) throw error;
+      if (authMode === "signup") {
+        const existingUser = users.find((user) => user.email.toLowerCase() === email);
 
-    } else {
+        if (existingUser) {
+          setAuthError("An account with that email already exists.");
+          return;
+        }
 
-      const { error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
+        const passwordRecord = await createPasswordRecord(password);
+        const newUser: UserAccount = {
+          id: createId(),
+          name,
+          email,
+          passwordHash: passwordRecord.passwordHash,
+          salt: passwordRecord.salt,
+          trades: sampleTrades(),
+        };
 
-      if (error) throw error;
+        setUsers((previousUsers) => [...previousUsers, newUser]);
+        setSessionUserId(newUser.id);
+        setView("dashboard");
+        setAuthForm({ name: "", email: "", password: "" });
+        return;
+      }
 
+      const matchedUser = users.find((user) => user.email.toLowerCase() === email);
+
+      if (!matchedUser) {
+        setAuthError("Email or password does not match an existing account.");
+        return;
+      }
+
+      let authenticated = false;
+
+      if (matchedUser.passwordHash && matchedUser.salt) {
+        const submittedHash = await hashPassword(password, matchedUser.salt);
+        authenticated = submittedHash === matchedUser.passwordHash;
+      } else if (matchedUser.legacyPassword) {
+        authenticated = matchedUser.legacyPassword === password;
+
+        if (authenticated) {
+          const passwordRecord = await createPasswordRecord(password);
+          setUsers((previousUsers) =>
+            previousUsers.map((user) =>
+              user.id === matchedUser.id
+                ? {
+                    ...user,
+                    passwordHash: passwordRecord.passwordHash,
+                    salt: passwordRecord.salt,
+                    legacyPassword: undefined,
+                  }
+                : user,
+            ),
+          );
+        }
+      }
+
+      if (!authenticated) {
+        setAuthError("Email or password does not match an existing account.");
+        return;
+      }
+
+      setSessionUserId(matchedUser.id);
       setView("dashboard");
+      setAuthForm({ name: "", email: "", password: "" });
+    } finally {
+      setAuthBusy(false);
     }
-
-  } catch (err: any) {
-    setAuthError(err.message);
   }
-
-  setAuthBusy(false);
-}
 
   function handleLogout() {
     setSessionUserId(null);
@@ -1569,15 +1861,15 @@ useEffect(() => {
     event.preventDefault();
     setTradeError("");
 
- if (!session) {
-  return <Login />;
-}
+    if (!currentUser) {
+      return;
+    }
 
-    const lotSize = Number(tradeForm.lotSize);
+    const lotSize = tradeForm.lotSize === "" ? 0 : Number(tradeForm.lotSize);
     const pnl = Number(tradeForm.pnl);
     const roi = Number(tradeForm.roi);
 
-    if (Number.isNaN(lotSize) || lotSize <= 0) {
+    if (tradeForm.lotSize !== "" && (Number.isNaN(lotSize) || lotSize <= 0)) {
       setTradeError("Enter a valid lot size.");
       return;
     }
@@ -1605,15 +1897,12 @@ useEffect(() => {
       timeframe: tradeForm.timeframe,
       direction: tradeForm.direction,
       type: tradeForm.type,
-      lotSize,
+      lotSize: lotSize || 0,
       ruleFollowed: tradeForm.ruleFollowed,
       outcome: tradeForm.outcome,
       roi: Number(roi.toFixed(2)),
       pnl: pnl,
       rating: tradeForm.rating,
-      entryPrice: 0,
-      exitPrice: 0,
-      riskReward: 0,
       strategy: "",
       notes: tradeForm.notes.trim(),
       emotion: tradeForm.emotion,
@@ -1632,65 +1921,7 @@ useEffect(() => {
 
   function openTradeDetail(tradeId: string) {
     setSelectedTradeId(tradeId);
-    // No longer changing view to 'detail', we'll show it in the right sidebar
-  }
-
-  function closeTradeDetail() {
-    setSelectedTradeId(null);
-  }
-
-  function exportTradesCsv() {
-    if (!currentUser) {
-      return;
-    }
-
-    const header = [
-      "Date EST",
-      "Asset",
-      "Timeframe",
-      "Direction",
-      "Type",
-      "Lot Size",
-      "Rule Followed",
-      "Outcome",
-      "ROI %",
-      "P/L USD",
-      "Strategy",
-      "Emotion",
-      "Entry Price",
-      "Exit Price",
-      "Risk Reward",
-      "Notes",
-      "Mistakes",
-      "Lessons",
-    ];
-
-    const rows = trades.map((trade) => [
-      formatESTRange(trade.startDate, trade.endDate),
-      trade.asset,
-      trade.timeframe,
-      trade.direction,
-      trade.type,
-      String(trade.lotSize),
-      trade.ruleFollowed ? "YES" : "NO",
-      trade.outcome,
-      String(trade.roi),
-      String(trade.pnl),
-      trade.strategy,
-      trade.emotion,
-      String(trade.entryPrice),
-      String(trade.exitPrice),
-      String(trade.riskReward),
-      trade.notes,
-      trade.mistakes,
-      trade.lessons,
-    ]);
-
-    const csv = [header, ...rows]
-      .map((row) => row.map((cell) => `"${String(cell).split('"').join('""')}"`).join(","))
-      .join("\n");
-
-    downloadBlob(`tradetracker-${currentUser.email}-trades.csv`, csv, "text/csv;charset=utf-8");
+    setView("detail");
   }
 
   function exportBackupJson() {
@@ -1713,123 +1944,6 @@ useEffect(() => {
       `tradetracker-${currentUser.email}-backup.json`,
       JSON.stringify(backup, null, 2),
       "application/json;charset=utf-8",
-    );
-  }
-
-  function exportToHTML() {
-    if (!currentUser) return;
-    
-    const tradeRows = [...trades].sort((a,b) => new Date(b.startDate).getTime() - new Date(a.startDate).getTime()).map(t => {
-      const dirClass = t.direction === 'LONG' ? 'bg-sky-400/10 text-sky-300 border border-sky-400/20' : 'bg-amber-400/10 text-amber-300 border border-amber-400/20';
-      const outClass = t.outcome === 'Win' ? 'bg-emerald-400/10 text-emerald-300 border border-emerald-400/20' : t.outcome === 'Loss' ? 'bg-rose-400/10 text-rose-300 border border-rose-400/20' : 'bg-gray-400/10 text-gray-300 border border-gray-400/20';
-      const pnlClass = t.pnl >= 0 ? 'text-emerald-400' : 'text-rose-400';
-      const sign = t.pnl >= 0 ? '+' : '';
-      
-      return `
-        <tr class="hover:bg-white/[0.02] transition-colors">
-          <td class="p-4 text-gray-300">${new Date(t.startDate).toLocaleString()}</td>
-          <td class="p-4 font-medium text-white">${t.asset}</td>
-          <td class="p-4">
-            <span class="px-2 py-1 rounded-full text-xs ${dirClass}">${t.direction}</span>
-          </td>
-          <td class="p-4 text-gray-300">${t.lotSize}</td>
-          <td class="p-4">
-            <span class="px-2 py-1 rounded-full text-xs ${outClass}">${t.outcome}</span>
-          </td>
-          <td class="p-4 font-semibold ${pnlClass}">
-            ${sign}$${t.pnl.toFixed(2)}
-          </td>
-        </tr>
-      `;
-    }).join('');
-
-    const htmlContent = `<!DOCTYPE html>
-<html lang="en" class="dark">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TradeTracker - ${currentUser.name}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            gray: { 800: '#1f2937', 900: '#111827', 950: '#030712' }
-          }
-        }
-      }
-    }
-  </script>
-  <style>
-    body { background-color: #05070b; color: #f3f4f6; font-family: system-ui, -apple-system, sans-serif; }
-  </style>
-</head>
-<body class="p-8 bg-gradient-to-b from-[#0a0f18] to-[#05070b] min-h-screen">
-  <div class="max-w-6xl mx-auto space-y-8">
-    <header class="flex justify-between items-end border-b border-white/10 pb-6">
-      <div>
-        <p class="text-xs uppercase tracking-widest text-cyan-400 font-semibold mb-2">TradeTracker Export</p>
-        <h1 class="text-4xl font-bold text-white">${currentUser.name}'s Journal</h1>
-      </div>
-      <div class="text-right">
-        <p class="text-sm text-gray-400">Exported on</p>
-        <p class="text-white font-medium">${new Date().toLocaleDateString()}</p>
-      </div>
-    </header>
-
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
-      <div class="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-sm">
-        <p class="text-xs uppercase tracking-widest text-gray-400 mb-2">Total Trades</p>
-        <p class="text-3xl font-semibold text-white">${allAnalytics.totalTrades}</p>
-      </div>
-      <div class="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-sm">
-        <p class="text-xs uppercase tracking-widest text-gray-400 mb-2">Win Rate</p>
-        <p class="text-3xl font-semibold text-white">${allAnalytics.winRate.toFixed(1)}%</p>
-      </div>
-      <div class="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-sm">
-        <p class="text-xs uppercase tracking-widest text-gray-400 mb-2">Total P/L</p>
-        <p class="text-3xl font-semibold ${allAnalytics.totalPnL >= 0 ? 'text-emerald-400' : 'text-rose-400'}">
-          ${allAnalytics.totalPnL >= 0 ? '+' : ''}$${allAnalytics.totalPnL.toFixed(2)}
-        </p>
-      </div>
-      <div class="bg-white/5 border border-white/10 rounded-2xl p-5 backdrop-blur-sm">
-        <p class="text-xs uppercase tracking-widest text-gray-400 mb-2">Avg ROI</p>
-        <p class="text-3xl font-semibold text-white">${allAnalytics.averageROI.toFixed(2)}%</p>
-      </div>
-    </div>
-
-    <div class="bg-[#070c13] border border-white/10 rounded-[28px] overflow-hidden shadow-2xl">
-      <div class="p-6 border-b border-white/10 bg-white/[0.02]">
-        <h2 class="text-xl font-semibold text-white">Trade History</h2>
-      </div>
-      <div class="overflow-x-auto">
-        <table class="w-full text-left text-sm whitespace-nowrap">
-          <thead class="bg-white/[0.03] text-xs uppercase tracking-widest text-gray-400">
-            <tr>
-              <th class="p-4 font-medium">Date</th>
-              <th class="p-4 font-medium">Asset</th>
-              <th class="p-4 font-medium">Direction</th>
-              <th class="p-4 font-medium">Lot Size</th>
-              <th class="p-4 font-medium">Outcome</th>
-              <th class="p-4 font-medium">P/L</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-white/5">
-            ${tradeRows}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  </div>
-</body>
-</html>`;
-    
-    downloadBlob(
-      `tradetracker-${currentUser.name.replace(/\s+/g, '-').toLowerCase()}-journal.html`,
-      htmlContent,
-      "text/html;charset=utf-8"
     );
   }
 
@@ -2004,26 +2118,11 @@ useEffect(() => {
     );
   }
 
-  function updateTrade(tradeId: string, updates: Partial<Trade>) {
-    if (!currentUser) return;
-    setUsers((previousUsers) =>
-      previousUsers.map((user) => {
-        if (user.id !== currentUser.id) return user;
-        return {
-          ...user,
-          trades: user.trades.map((trade) =>
-            trade.id === tradeId ? { ...trade, ...updates } : trade
-          ),
-        };
-      })
-    );
-  }
-
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.1),transparent_25%),radial-gradient(circle_at_top_right,rgba(245,158,11,0.12),transparent_26%),radial-gradient(circle_at_bottom,rgba(16,185,129,0.08),transparent_28%),linear-gradient(180deg,#05070b,#09111b_40%,#06080d)] text-white">
-      <div className="mx-auto max-w-[1800px] px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
-        <div className="flex flex-col gap-6 xl:flex-row h-full">
-          <aside className={`transition-all duration-300 xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)] rounded-[34px] border border-white/10 bg-[linear-gradient(180deg,rgba(10,14,22,0.96),rgba(6,9,14,0.98))] shadow-[0_30px_80px_rgba(0,0,0,0.44)] flex flex-col shrink-0 ${isSidebarCollapsed ? "w-full xl:w-24 p-4" : "w-full xl:w-80 p-6"}`}>
+      <div className="mx-auto max-w-[1600px] px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
+        <div className={`grid gap-6 transition-[grid-template-columns] duration-200 ${isSidebarCollapsed ? "xl:grid-cols-[96px_1fr]" : "xl:grid-cols-[300px_1fr]"}`}>
+          <aside className={`transition-[width,padding] duration-200 xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)] rounded-[34px] border border-white/10 bg-[linear-gradient(180deg,rgba(10,14,22,0.96),rgba(6,9,14,0.98))] shadow-[0_18px_48px_rgba(0,0,0,0.34)] flex flex-col ${isSidebarCollapsed ? "w-24 p-4" : "w-full xl:w-80 p-6"}`}>
             <div className="flex items-center justify-between mb-6">
               {!isSidebarCollapsed && (
                  <p className="text-[11px] uppercase tracking-[0.34em] text-cyan-200/80 whitespace-nowrap overflow-hidden">TradeTracker</p>
@@ -2052,6 +2151,7 @@ useEffect(() => {
                 ["dashboard", "Dashboard", "M3 3h18v18H3zM3 9h18M9 21V9"],
                 ["add", "Add Trade", "M12 5v14M5 12h14"],
                 ["analytics", "Analytics", "M3 3v18h18M18 17l-5-5-5 5-5-5"],
+                ["detail", "Trade Detail", "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"],
               ] as [View, string, string][]).map(([targetView, label, path]) => {
                 const active = view === targetView;
                 return (
@@ -2133,7 +2233,7 @@ useEffect(() => {
             </div>
           </aside>
 
-          <main className="flex-1 space-y-6 overflow-hidden">
+          <main className="space-y-6">
 
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
               <StatTile label="Total Trades" value={String(allAnalytics.totalTrades)} hint="All recorded executions in your journal" accent="from-cyan-400 via-sky-400 to-cyan-200" />
@@ -2176,19 +2276,6 @@ useEffect(() => {
                 <SectionCard
                   title="Trade Journal"
                   eyebrow="Notion-style database"
-                  action={
-                    <div className="flex flex-wrap gap-2">
-                      <button type="button" onClick={exportTradesCsv} className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-100 transition hover:bg-white/[0.08]">
-                        CSV
-                      </button>
-                      <button type="button" onClick={exportToHTML} className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-100 transition hover:bg-white/[0.08]">
-                        HTML Page
-                      </button>
-                      <button type="button" onClick={exportBackupJson} className="rounded-full border border-cyan-300/20 bg-cyan-400/10 px-4 py-2 text-sm text-cyan-100 transition hover:bg-cyan-400/15">
-                        Backup Data
-                      </button>
-                    </div>
-                  }
                 >
                   <div className="grid gap-4 rounded-[28px] border border-white/10 bg-white/[0.03] p-4 lg:grid-cols-6">
                     <SelectField label="Asset" value={filters.asset} options={filterOptions.assets} onChange={(value) => setFilters((previousState) => ({ ...previousState, asset: value }))} />
@@ -2220,7 +2307,7 @@ useEffect(() => {
                             <th className="px-4 py-4 font-medium">Outcome</th>
                             <th className="px-4 py-4 font-medium">ROI</th>
                             <th className="px-4 py-4 font-medium">P/L</th>
-                            <th className="px-4 py-4 font-medium">Daily Total P/L</th>
+                            <th className="px-4 py-4 font-medium">Total P/L</th>
                             <th className="px-4 py-4 font-medium">Rating</th>
                           </tr>
                         </thead>
@@ -2232,23 +2319,28 @@ useEffect(() => {
                               </td>
                             </tr>
                           ) : (
-                            journalRows.map(({ trade, dailyTotal }) => (
+                            journalRows.map(({ trade, runningTotal }) => (
                               <tr
                                 key={trade.id}
                                 onClick={() => openTradeDetail(trade.id)}
                                 className="cursor-pointer border-t border-white/6 text-sm text-slate-200 transition hover:bg-white/[0.04]"
                               >
                                 <td className="px-4 py-4 align-top text-slate-300">{formatESTRange(trade.startDate, trade.endDate)}</td>
-                                <td className="px-4 py-4 align-top font-medium text-white">{trade.asset}</td>
+                                <td className="px-4 py-4 align-top">
+                                  <div>
+                                    <p className="font-medium text-white">{trade.asset}</p>
+                                    <p className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">{trade.strategy}</p>
+                                  </div>
+                                </td>
                                 <td className="px-4 py-4 align-top text-slate-300">{trade.timeframe}</td>
                                 <td className="px-4 py-4 align-top"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${getDirectionClass(trade.direction)}`}>{trade.direction}</span></td>
                                 <td className="px-4 py-4 align-top text-slate-300">{trade.type}</td>
-                                <td className="px-4 py-4 align-top text-slate-300">{trade.lotSize || "-"}</td>
+                                <td className="px-4 py-4 align-top text-slate-300">{trade.lotSize}</td>
                                 <td className="px-4 py-4 align-top text-slate-300">{trade.ruleFollowed ? "YES" : "NO"}</td>
                                 <td className="px-4 py-4 align-top"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${getOutcomeClass(trade.outcome)}`}>{trade.outcome}</span></td>
                                 <td className={`px-4 py-4 align-top ${trade.roi >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{formatPercent(trade.roi)}</td>
                                 <td className={`px-4 py-4 align-top ${trade.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{formatCurrency(trade.pnl)}</td>
-                                <td className={`px-4 py-4 align-top ${dailyTotal >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{formatCurrency(dailyTotal)}</td>
+                                <td className={`px-4 py-4 align-top ${runningTotal >= 0 ? "text-cyan-200" : "text-rose-300"}`}>{formatCurrency(runningTotal)}</td>
                                 <td className="px-4 py-4 align-top"><StarRating rating={trade.rating} /></td>
                               </tr>
                             ))
@@ -2267,7 +2359,7 @@ useEffect(() => {
                   <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
                     <label className="space-y-2 text-sm text-slate-300">
                       <span>Start date and time</span>
-                      <input type="datetime-local" value={tradeForm.startDate} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, startDate: event.target.value, endDate: event.target.value }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" />
+                      <input type="datetime-local" value={tradeForm.startDate} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, startDate: event.target.value }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" />
                     </label>
                     <label className="space-y-2 text-sm text-slate-300">
                       <span>End date and time</span>
@@ -2317,21 +2409,13 @@ useEffect(() => {
                     <SelectField label="Outcome" value={tradeForm.outcome} options={["Win", "Loss", "Breakeven"]} onChange={(value) => {
                       const outcome = value as Outcome;
                       const currentPnl = Number(tradeForm.pnl) || 0;
-                      const currentRoi = Number(tradeForm.roi) || 0;
                       // Auto-convert P&L to negative when outcome is Loss
                       const newPnl = outcome === "Loss" && currentPnl > 0 
                         ? String(-Math.abs(currentPnl)) 
                         : outcome === "Win" && currentPnl < 0 
                           ? String(Math.abs(currentPnl))
                           : tradeForm.pnl;
-                      // Auto-convert ROI to negative when outcome is Loss
-                      const newRoi = outcome === "Loss" && currentRoi > 0 
-                        ? String(-Math.abs(currentRoi)) 
-                        : outcome === "Win" && currentRoi < 0 
-                          ? String(Math.abs(currentRoi))
-                          : tradeForm.roi;
-
-                      setTradeForm((previousState) => ({ ...previousState, outcome, pnl: newPnl, roi: newRoi }));
+                      setTradeForm((previousState) => ({ ...previousState, outcome, pnl: newPnl }));
                     }} />
                     <SelectField label="Emotion during trade" value={tradeForm.emotion} options={emotionOptions} onChange={(value) => setTradeForm((previousState) => ({ ...previousState, emotion: value }))} />
                     <label className="space-y-2 text-sm text-slate-300">
@@ -2437,216 +2521,56 @@ useEffect(() => {
                   <SectionCard title="Equity Curve" eyebrow="Cumulative performance">
                     <MiniLineChart data={filteredAnalytics.equityCurve} />
                   </SectionCard>
-                  <SectionCard title="Outcome Distribution" eyebrow="Wins, losses, breakeven">
-                    <OutcomeRing data={filteredAnalytics.outcomeBreakdown} />
+                  <SectionCard title="Outcome Distribution" eyebrow="Interactive pie chart">
+                    <AdvancedPieChart data={filteredAnalytics.outcomeBreakdown.map(o => ({ name: o.label, value: o.value, color: o.color }))} />
                   </SectionCard>
                 </div>
 
                 <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
                   <SectionCard title="Profit by Month" eyebrow="Monthly curve">
-                    <MonthlyBarsChart data={filteredAnalytics.profitByMonth} />
+                    <AdvancedBarChart data={filteredAnalytics.profitByMonth.map(m => ({ name: m.month, value: m.value }))} />
                   </SectionCard>
                   <SectionCard title="Win Rate by Strategy" eyebrow="Setup quality">
                     <StrategyBars data={filteredAnalytics.winRateByStrategy} />
                   </SectionCard>
                 </div>
 
-                <div className="grid gap-6 xl:grid-cols-2">
+                <div className="grid gap-6 xl:grid-cols-3">
                     <SectionCard title="Performance by EST Hour" eyebrow="Market timing">
                         <HourPerformanceChart data={filteredAnalytics.hourlyPerformance} />
                     </SectionCard>
                     <SectionCard title="Weekday Performance" eyebrow="Best trading days">
                         <WeekdayPerformanceChart data={filteredAnalytics.weekdayPerformance} />
-                   </SectionCard>
+                    </SectionCard>
+                    <SectionCard title="Direction Performance" eyebrow="LONG vs SHORT">
+                        <DirectionDonutChart trades={filteredTrades} />
+                    </SectionCard>
                 </div>
 
-                <div className="grid gap-6 xl:grid-cols-3">
-                  <SectionCard title="Drawdown Analysis" eyebrow="Risk & Pain period">
-                    <DrawdownChart data={filteredAnalytics.drawdownCurve} />
-                  </SectionCard>
-                  <SectionCard title="Profit by Asset" eyebrow="Market edge">
-                    <AssetProfitChart data={filteredAnalytics.profitByAsset} />
-                  </SectionCard>
-                  <SectionCard title="Hold Time vs P/L" eyebrow="Efficiency scatter">
-                    <DurationScatterChart data={filteredAnalytics.durationVsPnL} />
-                  </SectionCard>
-                </div>
+                <SectionCard title="Asset Performance Heatmap" eyebrow="Profitability by instrument">
+                  <AssetHeatmap trades={filteredTrades} />
+                </SectionCard>
               </>
             ) : null}
+
+            {view === "detail" ? (
+              selectedTrade ? (
+                <TradeDetailSection
+                  trade={selectedTrade}
+                  currentUser={currentUser}
+                  setUsers={setUsers}
+                  setView={setView}
+                  setSelectedTradeId={setSelectedTradeId}
+                />
+              ) : (
+                <SectionCard title="Trade Detail" eyebrow="No trade selected">
+                  <div className="rounded-[28px] border border-dashed border-white/10 bg-white/[0.03] px-4 py-16 text-center text-slate-400">
+                    Select a row from the journal dashboard to open a full trade review.
+                  </div>
+                </SectionCard>
+              )
+            ) : null}
           </main>
-
-          {selectedTradeId && (
-            <aside className="w-full xl:w-[600px] border-l border-white/10 bg-slate-900/60 p-6 overflow-y-auto max-h-screen xl:sticky xl:top-0">
-               {selectedTrade ? (
-                <div className="space-y-6">
-                   <div className="flex items-center justify-between">
-                      <div>
-                        <p className="text-[11px] uppercase tracking-[0.34em] text-cyan-200/80">Trade Review</p>
-                        <h2 className="mt-2 font-display text-2xl font-semibold text-white">{selectedTrade.asset}</h2>
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            if (!currentUser) return;
-                            const shouldDelete = window.confirm("Delete this trade permanently?");
-                            if (!shouldDelete) return;
-                            setUsers((previousUsers) =>
-                              previousUsers.map((user) =>
-                                user.id === currentUser.id
-                                  ? { ...user, trades: user.trades.filter((t) => t.id !== selectedTrade.id) }
-                                  : user
-                              )
-                            );
-                            setSelectedTradeId(null);
-                          }}
-                          className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-rose-400/30 bg-rose-400/10 text-rose-200 transition hover:bg-rose-400/20"
-                          title="Delete trade"
-                        >
-                          <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
-                            <path d="M4 7h16M9 7V5h6v2M7 7l1 13h8l1-13M10 11v6M14 11v6" />
-                          </svg>
-                        </button>
-                        <button onClick={closeTradeDetail} className="p-2 rounded-full hover:bg-white/10 text-slate-400">
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-6 h-6"><path d="M6 18L18 6M6 6l12 12" /></svg>
-                        </button>
-                      </div>
-                   </div>
-
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Asset</p>
-                       <InlineEdit value={selectedTrade.asset} onSave={(val) => updateTrade(selectedTrade.id, { asset: val.toUpperCase() })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Outcome</p>
-                       <InlineEdit type="select" options={["Win", "Loss", "Breakeven"]} value={selectedTrade.outcome} onSave={(val) => {
-                          const outcome = val as Outcome;
-                          const currentPnl = selectedTrade.pnl;
-                          const currentRoi = selectedTrade.roi;
-                          let newPnl = currentPnl;
-                          let newRoi = currentRoi;
-                          if (outcome === "Loss" && currentPnl > 0) newPnl = -Math.abs(currentPnl);
-                          if (outcome === "Win" && currentPnl < 0) newPnl = Math.abs(currentPnl);
-                          if (outcome === "Loss" && currentRoi > 0) newRoi = -Math.abs(currentRoi);
-                          if (outcome === "Win" && currentRoi < 0) newRoi = Math.abs(currentRoi);
-                          updateTrade(selectedTrade.id, { outcome, pnl: newPnl, roi: newRoi });
-                       }} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">P&L ($)</p>
-                       <InlineEdit type="number" formatType="currency" value={selectedTrade.pnl} onSave={(val) => updateTrade(selectedTrade.id, { pnl: Number(val) })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">ROI (%)</p>
-                       <InlineEdit type="number" formatType="percent" value={selectedTrade.roi} onSave={(val) => updateTrade(selectedTrade.id, { roi: Number(val) })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Lot Size</p>
-                       <InlineEdit type="number" value={selectedTrade.lotSize || 0} onSave={(val) => updateTrade(selectedTrade.id, { lotSize: Number(val) })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Direction</p>
-                       <InlineEdit type="select" options={["LONG", "SHORT"]} value={selectedTrade.direction} onSave={(val) => updateTrade(selectedTrade.id, { direction: val as Direction })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Entry Price</p>
-                       <InlineEdit type="number" value={selectedTrade.entryPrice || 0} onSave={(val) => updateTrade(selectedTrade.id, { entryPrice: Number(val) })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Exit Price</p>
-                       <InlineEdit type="number" value={selectedTrade.exitPrice || 0} onSave={(val) => updateTrade(selectedTrade.id, { exitPrice: Number(val) })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4 sm:col-span-2">
-                       <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Execution Time (EST)</p>
-                       <InlineEdit type="datetime-local" value={selectedTrade.startDate} onSave={(val) => updateTrade(selectedTrade.id, { startDate: val, endDate: val })} />
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                      <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Emotion</p>
-                      <InlineEdit type="select" options={emotionOptions} value={selectedTrade.emotion} onSave={(val) => updateTrade(selectedTrade.id, { emotion: val })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                      <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Rating</p>
-                      <InlineEdit type="select" options={["1", "2", "3", "4", "5"]} value={String(selectedTrade.rating)} onSave={(val) => updateTrade(selectedTrade.id, { rating: Number(val) })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                      <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Notes</p>
-                      <InlineEdit type="textarea" value={selectedTrade.notes || "Add notes..."} onSave={(val) => updateTrade(selectedTrade.id, { notes: val })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                      <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Mistakes</p>
-                      <InlineEdit type="textarea" value={selectedTrade.mistakes || "Log mistakes..."} onSave={(val) => updateTrade(selectedTrade.id, { mistakes: val })} />
-                    </div>
-                    <div className="rounded-2xl border border-white/10 bg-white/[0.04] p-4">
-                      <p className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">Lessons Learned</p>
-                      <InlineEdit type="textarea" value={selectedTrade.lessons || "Key takeaways..."} onSave={(val) => updateTrade(selectedTrade.id, { lessons: val })} />
-                    </div>
-                  </div>
-
-                  <div className="space-y-4">
-                      {([
-                        ["entry", "Entry charts"],
-                        ["exit", "Exit charts"],
-                        ["review", "Review screenshots"],
-                      ] as [ScreenshotCategory, string][]).map(([category, title]) => (
-                        <div key={category} className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
-                          <div className="flex items-center justify-between gap-4">
-                            <div>
-                              <p className="font-medium text-white">{title}</p>
-                              <p className="mt-1 text-xs uppercase tracking-[0.22em] text-slate-500">{selectedTrade.screenshots[category].length} images</p>
-                            </div>
-                            <label className="inline-flex cursor-pointer rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-slate-200 transition hover:bg-white/[0.08]">
-                              Add Image
-                              <input type="file" accept="image/*" multiple className="hidden" onChange={async (e) => {
-                                const urls = await toDataUrls(e.target.files);
-                                updateTrade(selectedTrade.id, { 
-                                  screenshots: { 
-                                    ...selectedTrade.screenshots, 
-                                    [category]: [...selectedTrade.screenshots[category], ...urls] 
-                                  } 
-                                });
-                              }} />
-                            </label>
-                          </div>
-                          <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                            {selectedTrade.screenshots[category].length === 0 ? (
-                              <div className="rounded-[20px] border border-dashed border-white/10 bg-black/20 px-4 py-8 text-center text-sm text-slate-500 sm:col-span-2">
-                                No images.
-                              </div>
-                            ) : (
-                              selectedTrade.screenshots[category].map((image, index) => (
-                                <div key={`${category}-${index}`} className="group relative overflow-hidden rounded-[20px] border border-white/10 bg-slate-950/60">
-                                  <img src={image} alt={`${title} ${index + 1}`} className="h-32 w-full object-cover" />
-                                  <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center gap-2">
-                                    <button 
-                                      onClick={() => {
-                                        updateTrade(selectedTrade.id, {
-                                          screenshots: {
-                                            ...selectedTrade.screenshots,
-                                            [category]: selectedTrade.screenshots[category].filter((_, i) => i !== index)
-                                          }
-                                        });
-                                      }}
-                                      className="p-2 bg-rose-500 rounded-full text-white"
-                                      title="Remove"
-                                    >
-                                       <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 7h16M10 11v6M14 11v6M5 7l1 12a2 2 0 002 2h8a2 2 0 002-2l1-12M9 7V4a1 1 0 011-1h4a1 1 0 011 1v3" /></svg>
-                                    </button>
-                                  </div>
-                                </div>
-                              ))
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                  </div>
-                </div>
-               ) : null}
-            </aside>
-          )}
         </div>
       </div>
     </div>
