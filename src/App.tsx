@@ -557,12 +557,16 @@ export default function App() {
   }, [session]);
 
   const handleLogin = (email: string) => {
-    const acc = loadAccounts();
-    setAccounts(acc);
+  const acc = loadAccounts();
+
+  setAccounts(acc);
+
+  setTimeout(() => {
     setSession(email);
     saveSession(email);
-  };
-
+  }, 0);
+};
+  
   const handleLogout = () => { setSession(null); saveSession(null); setPage("dashboard"); };
   const toggleDark = () => mutate(u => { u.darkMode = !u.darkMode; });
 
@@ -802,9 +806,21 @@ export default function App() {
     return <LandingPage onEnter={() => setShowLanding(false)} />;
   }
 
-  if (!session || !currentUser) {
-    return <AnimatedAuthPage onLogin={(email) => { handleLogin(email); setShowLanding(false); }} onBack={() => setShowLanding(true)} />;
-  }
+ if (session && !currentUser) {
+  return <div className="text-white p-10">Loading...</div>;
+}
+
+if (!session) {
+  return (
+    <AnimatedAuthPage
+      onLogin={(email) => {
+        handleLogin(email);
+        setShowLanding(false);
+      }}
+      onBack={() => setShowLanding(true)}
+    />
+  );
+}
 
   // ─── Common input style ────────────────────────────────────────────────────
   const inputCls = `w-full px-3 py-2.5 rounded-xl text-sm border outline-none transition-colors focus:border-violet-500`;
