@@ -1,2580 +1,1549 @@
-import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState, useRef } from "react";
-
-type AuthMode = "login" | "signup";
-type View = "dashboard" | "add" | "analytics" | "detail";
-type Direction = "LONG" | "SHORT";
-type TradeType = "Exit" | "Stop Loss" | "Take Profit";
-type Outcome = "Win" | "Loss" | "Breakeven";
-type ScreenshotCategory = "entry" | "exit" | "review";
-
-type Trade = {
-  id: string;
-  startDate: string;
-  endDate: string;
-  asset: string;
-  timeframe: string;
-  direction: Direction;
-  type: TradeType;
-  lotSize: number;
-  ruleFollowed: boolean;
-  outcome: Outcome;
-  roi: number;
-  pnl: number;
-  rating: number;
-  strategy: string;
-  notes: string;
-  emotion: string;
-  mistakes: string;
-  lessons: string;
-  screenshots: Record<ScreenshotCategory, string[]>;
-};
-
-type UserAccount = {
-  id: string;
-  name: string;
-  email: string;
-  passwordHash: string;
-  salt: string;
-  trades: Trade[];
-  legacyPassword?: string;
-};
-
-type AuthFormState = {
-  name: string;
-  email: string;
-  password: string;
-};
-
-type TradeFormState = {
-  startDate: string;
-  endDate: string;
-  asset: string;
-  timeframe: string;
-  direction: Direction;
-  type: TradeType;
-  lotSize: string;
-  ruleFollowed: boolean;
-  outcome: Outcome;
-  roi: string;
-  pnl: string;
-  rating: number;
-  strategy: string;
-  notes: string;
-  emotion: string;
-  mistakes: string;
-  lessons: string;
-  screenshots: Record<ScreenshotCategory, string[]>;
-};
-
-type Filters = {
-  asset: string;
-  strategy: string;
-  outcome: string;
-  direction: string;
-  startDate: string;
-  endDate: string;
-};
-
-type TradeAnalytics = {
-  totalTrades: number;
-  totalPnL: number;
-  winRate: number;
-  averageROI: number;
-  bestTrade: Trade | null;
-  worstTrade: Trade | null;
-  profitByMonth: { month: string; value: number }[];
-  winRateByStrategy: { strategy: string; winRate: number; total: number }[];
-  outcomeBreakdown: { label: Outcome; value: number; color: string }[];
-  equityCurve: { label: string; value: number }[];
-  hourlyPerformance: { hour: string; value: number }[];
-  weekdayPerformance: { day: string; value: number; count: number }[];
-  expectancy: number;
-};
-
-const USERS_STORAGE = "tradetracker-users";
-const SESSION_STORAGE = "tradetracker-session";
-const EST_TIMEZONE = "America/New_York";
-
-const timeframeOptions = ["1m", "5m", "15m", "1h", "4h", "1D"];
-const strategyOptions = ["London Breakout", "VWAP Reclaim", "Range Fade", "Trend Continuation", "Liquidity Sweep"];
-const emotionOptions = ["Calm", "Confident", "FOMO", "Hesitant", "Focused", "Overtrading"];
-const assetsPreset = ["XAUUSD", "BTCUSD", "EURUSD", "NAS100", "SPX500"];
-
-function createId() {
-  return typeof crypto !== "undefined" && "randomUUID" in crypto
-    ? crypto.randomUUID()
-    : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function readLocalStorage(key: string) {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  return window.localStorage.getItem(key);
-}
-
-function toInputDate(date: Date) {
-  // Format date as YYYY-MM-DDTHH:MM for datetime-local input without timezone shift
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  return `${year}-${month}-${day}T${hours}:${minutes}`;
-}
-
-function emptyTradeForm(): TradeFormState {
-  const now = new Date();
-  const oneMinuteLater = new Date(now.getTime() + 1 * 60_000);
-
-  return {
-    startDate: toInputDate(now),
-    endDate: toInputDate(oneMinuteLater),
-    asset: "XAUUSD",
-    timeframe: "1m",
-    direction: "LONG",
-    type: "Take Profit",
-    lotSize: "",
-    ruleFollowed: true,
-    outcome: "Win",
-    roi: "",
-    pnl: "",
-    rating: 4,
-    strategy: "",
-    notes: "",
-    emotion: "Focused",
-    mistakes: "",
-    lessons: "",
-    screenshots: {
-      entry: [],
-      exit: [],
-      review: [],
-    },
-  };
-}
-
-function sampleTrades(): Trade[] {
-  return [];
-}
-
-function loadUsers(): UserAccount[] {
-  const stored = readLocalStorage(USERS_STORAGE);
-
-  if (!stored) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(stored) as Array<
-      Partial<UserAccount> & {
-        password?: string;
-        trades?: Trade[];
-      }
-    >;
-
-    return parsed.map((user) => ({
-      id: user.id ?? createId(),
-      name: user.name ?? "Trader",
-      email: user.email ?? "",
-      passwordHash: user.passwordHash ?? "",
-      salt: user.salt ?? "",
-      trades: user.trades ?? [],
-      legacyPassword: user.password,
-    }));
-  } catch {
-    return [];
-  }
-}
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-    maximumFractionDigits: 2,
-  }).format(value);
-}
-
-function formatPercent(value: number) {
-  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
-}
-
-function formatEST(dateString: string, options: Intl.DateTimeFormatOptions) {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: EST_TIMEZONE,
-    ...options,
-  }).format(new Date(dateString));
-}
-
-function formatESTRange(startDate: string, endDate: string) {
-  const startLabel = formatEST(startDate, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-  const endLabel = formatEST(endDate, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-
-  if (startLabel === endLabel) {
-    return `${startLabel} ${formatEST(startDate, { hour: "numeric", minute: "2-digit", hour12: true })} -> ${formatEST(endDate, {
-      hour: "numeric",
-      minute: "2-digit",
-      hour12: true,
-    })} ET`;
-  }
-
-  return `${formatEST(startDate, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-  })} -> ${formatEST(endDate, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-  })} ET`;
-}
-
-function sumProfit(trades: Trade[]) {
-  return trades.reduce((total, trade) => total + trade.pnl, 0);
-}
-
-function countWins(trades: Trade[]) {
-  return trades.filter((trade) => trade.outcome === "Win").length;
-}
-
-function getOutcomeClass(outcome: Outcome) {
-  if (outcome === "Win") {
-    return "bg-emerald-400/15 text-emerald-200 ring-1 ring-emerald-300/20";
-  }
-
-  if (outcome === "Loss") {
-    return "bg-rose-400/15 text-rose-200 ring-1 ring-rose-300/20";
-  }
-
-  return "bg-slate-300/10 text-slate-200 ring-1 ring-white/10";
-}
-
-function getDirectionClass(direction: Direction) {
-  return direction === "LONG"
-    ? "bg-sky-400/15 text-sky-200 ring-1 ring-sky-300/20"
-    : "bg-amber-300/15 text-amber-100 ring-1 ring-amber-200/20";
-}
-
-function toDataUrls(files: FileList | null) {
-  if (!files || files.length === 0) {
-    return Promise.resolve([] as string[]);
-  }
-
-  return Promise.all(
-    Array.from(files).map(
-      (file) =>
-        new Promise<string>((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(String(reader.result));
-          reader.onerror = () => reject(new Error(`Unable to read file: ${file.name}`));
-          reader.readAsDataURL(file);
-        }),
-    ),
-  );
-}
-
-function getESTHour(dateString: string) {
-  return Number(
-    new Intl.DateTimeFormat("en-US", {
-      timeZone: EST_TIMEZONE,
-      hour: "2-digit",
-      hourCycle: "h23",
-    }).format(new Date(dateString)),
-  );
-}
-
-function buildTradeAnalytics(trades: Trade[]): TradeAnalytics {
-  const totalTrades = trades.length;
-  const totalPnL = sumProfit(trades);
-  const wins = countWins(trades);
-  const winRate = totalTrades === 0 ? 0 : (wins / totalTrades) * 100;
-  const averageROI = totalTrades === 0 ? 0 : trades.reduce((total, trade) => total + trade.roi, 0) / totalTrades;
-  const bestTrade = [...trades].sort((a, b) => b.pnl - a.pnl)[0] ?? null;
-  const worstTrade = [...trades].sort((a, b) => a.pnl - b.pnl)[0] ?? null;
-
-  const profitByMonth = Object.entries(
-    trades.reduce<Record<string, number>>((accumulator, trade) => {
-      const month = formatEST(trade.startDate, { month: "short", year: "numeric" });
-      accumulator[month] = (accumulator[month] ?? 0) + trade.pnl;
-      return accumulator;
-    }, {}),
-  ).map(([month, value]) => ({ month, value }));
-
-  const winRateByStrategy = Object.entries(
-    trades.reduce<Record<string, { total: number; wins: number }>>((accumulator, trade) => {
-      const current = accumulator[trade.strategy] ?? { total: 0, wins: 0 };
-      current.total += 1;
-      current.wins += trade.outcome === "Win" ? 1 : 0;
-      accumulator[trade.strategy] = current;
-      return accumulator;
-    }, {}),
-  )
-    .map(([strategy, value]) => ({
-      strategy,
-      total: value.total,
-      winRate: value.total === 0 ? 0 : Math.round((value.wins / value.total) * 100),
-    }))
-    .sort((a, b) => b.winRate - a.winRate);
-
-  const outcomeBreakdown: { label: Outcome; value: number; color: string }[] = [
-    { label: "Win", value: trades.filter((trade) => trade.outcome === "Win").length, color: "#34d399" },
-    { label: "Loss", value: trades.filter((trade) => trade.outcome === "Loss").length, color: "#fb7185" },
-    { label: "Breakeven", value: trades.filter((trade) => trade.outcome === "Breakeven").length, color: "#94a3b8" },
-  ];
-
-  const sortedTrades = [...trades].sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
-  let runningTotal = 0;
-  const equityCurve = sortedTrades.map((trade) => {
-    runningTotal += trade.pnl;
-    return {
-      label: formatEST(trade.startDate, { month: "short", day: "numeric" }),
-      value: runningTotal,
-    };
-  });
-
-  const hourlyMap = Array.from({ length: 24 }, (_, index) => ({
-    hour: `${String(index).padStart(2, "0")}:00`,
-    value: 0,
-  }));
-
-  trades.forEach((trade) => {
-    hourlyMap[getESTHour(trade.startDate)].value += trade.pnl;
-  });
-
-  return {
-    totalTrades,
-    totalPnL,
-    winRate,
-    averageROI,
-    bestTrade,
-    worstTrade,
-    profitByMonth,
-    winRateByStrategy,
-    outcomeBreakdown,
-    equityCurve,
-    hourlyPerformance: hourlyMap,
-    weekdayPerformance: calculateWeekdayPerformance(trades),
-    expectancy: calculateExpectancy(trades),
-  };
-}
-
-function calculateWeekdayPerformance(trades: Trade[]) {
-  const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const map = days.map((day) => ({ day, value: 0, count: 0 }));
-
-  trades.forEach((trade) => {
-    // Use startDate for the day of the week
-    const date = new Date(trade.startDate);
-    // Adjust to EST for correct day bucket
-    const estDate = new Date(date.toLocaleString("en-US", { timeZone: EST_TIMEZONE }));
-    const dayIndex = estDate.getDay();
-    map[dayIndex].value += trade.pnl;
-    map[dayIndex].count += 1;
-  });
-
-  // Filter out Sunday/Saturday if no trades, but typically keep Mon-Fri
-  return map.filter((d) => d.count > 0 || (d.day !== "Sunday" && d.day !== "Saturday"));
-}
-
-function calculateExpectancy(trades: Trade[]) {
-  const wins = trades.filter((t) => t.pnl > 0);
-  const losses = trades.filter((t) => t.pnl <= 0);
-
-  if (wins.length === 0 && losses.length === 0) return 0;
-
-  const avgWin = wins.length > 0 ? wins.reduce((sum, t) => sum + t.pnl, 0) / wins.length : 0;
-  const avgLoss = losses.length > 0 ? Math.abs(losses.reduce((sum, t) => sum + t.pnl, 0)) / losses.length : 0;
-  const winRate = wins.length / trades.length;
-  const lossRate = losses.length / trades.length;
-
-  return winRate * avgWin - lossRate * avgLoss;
-}
-
-function arrayBufferToHex(buffer: ArrayBuffer) {
-  return Array.from(new Uint8Array(buffer))
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-function generateSalt() {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return arrayBufferToHex(bytes.buffer);
-}
-
-async function hashPassword(password: string, salt: string) {
-  const keyMaterial = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      salt: new TextEncoder().encode(salt),
-      iterations: 120000,
-      hash: "SHA-256",
-    },
-    keyMaterial,
-    256,
-  );
-
-  return arrayBufferToHex(bits);
-}
-
-async function createPasswordRecord(password: string) {
-  const salt = generateSalt();
-  const passwordHash = await hashPassword(password, salt);
-  return { salt, passwordHash };
-}
-
-function downloadBlob(filename: string, content: string, type: string) {
-  const blob = new Blob([content], { type });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  URL.revokeObjectURL(url);
-}
-
-function StarRating({ rating }: { rating: number }) {
-  return (
-    <div className="flex items-center gap-1 text-amber-300">
-      {Array.from({ length: 5 }, (_, index) => (
-        <svg
-          key={index}
-          viewBox="0 0 20 20"
-          fill={index < rating ? "currentColor" : "none"}
-          className={`h-4 w-4 ${index < rating ? "text-amber-300" : "text-slate-600"}`}
-          stroke="currentColor"
-          strokeWidth="1.25"
-        >
-          <path d="M10 1.8l2.52 5.11 5.64.82-4.08 3.97.96 5.61L10 14.64 4.96 17.3l.96-5.61L1.84 7.73l5.64-.82L10 1.8z" />
-        </svg>
-      ))}
-    </div>
-  );
-}
-
-function SectionCard({
-  title,
-  eyebrow,
-  action,
-  children,
-  className = "",
-}: {
-  title: string;
-  eyebrow?: string;
-  action?: ReactNode;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <section className={`rounded-[30px] border border-white/10 bg-[linear-gradient(180deg,rgba(15,19,29,0.92),rgba(8,11,17,0.96))] p-5 shadow-[0_18px_48px_rgba(0,0,0,0.34)] md:p-6 ${className}`}>
-      <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <div>
-          {eyebrow ? <p className="text-[11px] uppercase tracking-[0.34em] text-cyan-200/65">{eyebrow}</p> : null}
-          <h2 className="mt-2 font-display text-2xl font-semibold tracking-tight text-white">{title}</h2>
-        </div>
-        {action}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function StatTile({
-  label,
-  value,
-  hint,
-  accent,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-  accent: string;
-}) {
-  return (
-    <div className="relative overflow-hidden rounded-[28px] border border-white/10 bg-white/[0.04] p-5">
-      <div className={`absolute inset-x-0 top-0 h-1 bg-gradient-to-r ${accent}`} />
-      <p className="text-[11px] uppercase tracking-[0.28em] text-slate-400">{label}</p>
-      <p className="mt-4 font-display text-3xl font-semibold text-white">{value}</p>
-      <p className="mt-2 text-sm text-slate-300">{hint}</p>
-    </div>
-  );
-}
-
-function SelectField({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: string;
-  options: string[];
-  onChange: (value: string) => void;
-}) {
-  return (
-    <label className="space-y-2 text-sm text-slate-300">
-      <span>{label}</span>
-      <select
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-        className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60"
-      >
-        {options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
-    </label>
-  );
-}
-
+// @ts-nocheck
+import { useState, useEffect, useRef, useCallback } from "react";
+import LandingPage from "./LandingPage";
 import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  Cell,
-  Pie,
-  PieChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-  Legend,
+  AreaChart, Area, BarChart, Bar, LineChart, Line,
+  XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  PieChart, Pie, Cell, ScatterChart, Scatter, RadarChart,
+  PolarGrid, PolarAngleAxis, Radar, Legend
 } from "recharts";
+import {
+  LayoutDashboard, PlusCircle, BarChart2, Calendar,
+  ChevronLeft, ChevronRight, Star, Upload, X, Edit2,
+  Trash2, Sun, Moon, Download, LogOut, Menu, TrendingUp,
+  TrendingDown, Activity, Target, Shield, Clock, Camera,
+  Image as ImageIcon, Eye, EyeOff, Sparkles, CheckCircle,
+  AlertCircle, Zap, Award, BookOpen, ArrowUpRight,
+  ArrowDownRight, DollarSign, Percent, BarChart3, ChevronDown
+} from "lucide-react";
 
-function MiniLineChart({ data }: { data: { label: string; value: number }[] }) {
-  const [activePoint, setActivePoint] = useState<{ label: string; value: number } | null>(null);
+// ─── Types ────────────────────────────────────────────────────────────────────
+interface Trade {
+  id: string;
+  asset: string;
+  timeframe: string;
+  direction: "LONG" | "SHORT";
+  tradeType: string;
+  lotSize: string;
+  ruleFollowed: "YES" | "NO";
+  outcome: "Win" | "Loss" | "Breakeven";
+  roi: string;
+  pl: string;
+  rating: number;
+  startDate: string;
+  endDate: string;
+  notes: string;
+  mistakes: string;
+  lessons: string;
+  emotion: string;
+  screenshots: string[];
+}
 
-  if (data.length === 0) {
-    return (
-      <div className="flex h-52 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">
-        Add trades to build your equity curve.
-      </div>
-    );
-  }
+interface UserAccount {
+  email: string;
+  username: string;
+  passHash: string;
+  trades: Trade[];
+  darkMode: boolean;
+  profilePicture: string;
+  preferredAssets: string[];
+}
 
-  const lastValue = data[data.length - 1]?.value ?? 0;
-  const minValue = Math.min(...data.map((d) => d.value), 0);
-  const maxValue = Math.max(...data.map((d) => d.value), 0);
+type Page = "dashboard" | "add" | "analytics" | "calendar";
 
-  const handleChartMove = (state: any) => {
-    if (state?.activeLabel && state?.activePayload?.length) {
-      setActivePoint({
-        label: state.activeLabel,
-        value: Number(state.activePayload[0].value ?? 0),
-      });
-    }
+// ─── Constants ────────────────────────────────────────────────────────────────
+const ASSETS = [
+  "XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "USDCHF",
+  "AUDUSD", "NZDUSD", "USDCAD", "EURGBP", "EURJPY", "GBPJPY",
+  "BTCUSD", "ETHUSD", "BNBUSD", "SOLUSD", "XRPUSD",
+  "US30", "SPX500", "NAS100", "UK100", "GER40",
+  "USOIL", "UKOIL", "NATGAS"
+];
+
+const TIMEFRAMES = ["1m","2m","3m","5m","10m","15m","30m","1h","2h","4h","6h","8h","12h","1D","1W"];
+const EMOTIONS = ["Calm","Focused","Confident","Anxious","Fearful","Greedy","Excited","Neutral","Frustrated","Revenge"];
+const TRADE_TYPES = ["Market","Limit","Stop","Take Profit","Stop Loss","Breakout","Reversal","Scalp","Swing","Position"];
+
+const NAV_ITEMS: { id: Page; label: string; icon: any }[] = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "add",       label: "Log Trade",  icon: PlusCircle },
+  { id: "analytics", label: "Analytics",  icon: BarChart2 },
+  { id: "calendar",  label: "Calendar",   icon: Calendar },
+];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function hashPass(p: string) {
+  let h = 0;
+  for (let i = 0; i < p.length; i++) h = (Math.imul(31, h) + p.charCodeAt(i)) | 0;
+  return h.toString(36);
+}
+
+function uid() { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+
+function fmtEST(iso: string) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("en-US", { timeZone: "America/New_York", month:"short", day:"numeric", year:"numeric", hour:"numeric", minute:"2-digit", hour12:true }) + " ET";
+  } catch { return iso; }
+}
+
+function fmtDate(iso: string) {
+  if (!iso) return "—";
+  try { return new Date(iso).toLocaleDateString("en-US", { timeZone: "America/New_York", month:"short", day:"numeric", year:"numeric" }); }
+  catch { return iso; }
+}
+
+function fmtMoney(n: number) {
+  return (n >= 0 ? "+" : "") + n.toLocaleString("en-US", { style:"currency", currency:"USD", maximumFractionDigits:2 });
+}
+
+function toLocalDT(iso: string) {
+  if (!iso) return "";
+  try {
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2,"0");
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  } catch { return ""; }
+}
+
+function loadAccounts(): Record<string, UserAccount> {
+  try { return JSON.parse(localStorage.getItem("tt_accounts") || "{}"); } catch { return {}; }
+}
+
+function saveAccounts(a: Record<string, UserAccount>) {
+  localStorage.setItem("tt_accounts", JSON.stringify(a));
+}
+
+function loadSession(): string | null { return localStorage.getItem("tt_session"); }
+function saveSession(e: string | null) {
+  e ? localStorage.setItem("tt_session", e) : localStorage.removeItem("tt_session");
+}
+
+// ─── Pupil / EyeBall components ───────────────────────────────────────────────
+function Pupil({ size=12, maxDistance=5, pupilColor="black", forceLookX, forceLookY }) {
+  const [mx,setMx] = useState(0); const [my,setMy] = useState(0);
+  const ref = useRef(null);
+  useEffect(() => {
+    const h = (e) => { setMx(e.clientX); setMy(e.clientY); };
+    window.addEventListener("mousemove",h);
+    return () => window.removeEventListener("mousemove",h);
+  },[]);
+  const pos = () => {
+    if (!ref.current) return {x:0,y:0};
+    if (forceLookX!==undefined && forceLookY!==undefined) return {x:forceLookX,y:forceLookY};
+    const r = ref.current.getBoundingClientRect();
+    const dx = mx-(r.left+r.width/2), dy = my-(r.top+r.height/2);
+    const dist = Math.min(Math.sqrt(dx*dx+dy*dy),maxDistance);
+    const ang = Math.atan2(dy,dx);
+    return {x:Math.cos(ang)*dist,y:Math.sin(ang)*dist};
+  };
+  const p = pos();
+  return <div ref={ref} className="rounded-full" style={{width:size,height:size,backgroundColor:pupilColor,transform:`translate(${p.x}px,${p.y}px)`,transition:"transform 0.1s ease-out"}} />;
+}
+
+function EyeBall({ size=48,pupilSize=16,maxDistance=10,eyeColor="white",pupilColor="black",isBlinking=false,forceLookX,forceLookY }) {
+  const [mx,setMx] = useState(0); const [my,setMy] = useState(0);
+  const ref = useRef(null);
+  useEffect(() => {
+    const h = (e) => { setMx(e.clientX); setMy(e.clientY); };
+    window.addEventListener("mousemove",h);
+    return () => window.removeEventListener("mousemove",h);
+  },[]);
+  const pos = () => {
+    if (!ref.current) return {x:0,y:0};
+    if (forceLookX!==undefined && forceLookY!==undefined) return {x:forceLookX,y:forceLookY};
+    const r = ref.current.getBoundingClientRect();
+    const dx = mx-(r.left+r.width/2), dy = my-(r.top+r.height/2);
+    const dist = Math.min(Math.sqrt(dx*dx+dy*dy),maxDistance);
+    const ang = Math.atan2(dy,dx);
+    return {x:Math.cos(ang)*dist,y:Math.sin(ang)*dist};
+  };
+  const p = pos();
+  return (
+    <div ref={ref} className="rounded-full flex items-center justify-center transition-all duration-150"
+      style={{width:size,height:isBlinking?2:size,backgroundColor:eyeColor,overflow:"hidden"}}>
+      {!isBlinking && <div className="rounded-full" style={{width:pupilSize,height:pupilSize,backgroundColor:pupilColor,transform:`translate(${p.x}px,${p.y}px)`,transition:"transform 0.1s ease-out"}} />}
+    </div>
+  );
+}
+
+// ─── Animated Auth Page ───────────────────────────────────────────────────────
+function AnimatedAuthPage({ onLogin, onBack }: { onLogin: (email: string) => void; onBack: () => void }) {
+  const [mode, setMode] = useState<"login"|"signup">("login");
+  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const [isLookingAtEachOther, setIsLookingAtEachOther] = useState(false);
+  const [isPurpleBlinking, setIsPurpleBlinking] = useState(false);
+
+  // Unlock scroll for auth page (full-page centered layout)
+  useEffect(() => {
+    document.body.classList.remove("dashboard");
+    document.body.classList.add("landing");
+    document.documentElement.style.overflow = "auto";
+    document.documentElement.style.height = "auto";
+    document.body.style.overflow = "auto";
+    document.body.style.height = "auto";
+    return () => {
+      document.body.classList.remove("landing");
+      document.documentElement.style.overflow = "";
+      document.documentElement.style.height = "";
+      document.body.style.overflow = "";
+      document.body.style.height = "";
+    };
+  }, []);
+  const [isBlackBlinking, setIsBlackBlinking] = useState(false);
+  const [isPurplePeeking, setIsPurplePeeking] = useState(false);
+  const [mx, setMx] = useState(0); const [my, setMy] = useState(0);
+  const purpleRef = useRef(null); const blackRef = useRef(null);
+  const yellowRef = useRef(null); const orangeRef = useRef(null);
+
+  useEffect(() => { const h = (e) => { setMx(e.clientX); setMy(e.clientY); }; window.addEventListener("mousemove",h); return () => window.removeEventListener("mousemove",h); },[]);
+
+  const scheduleBlink = (setter) => {
+    const t = setTimeout(() => { setter(true); setTimeout(() => { setter(false); scheduleBlink(setter); }, 150); }, Math.random()*4000+3000);
+    return t;
+  };
+  useEffect(() => { const t = scheduleBlink(setIsPurpleBlinking); return () => clearTimeout(t); },[]);
+  useEffect(() => { const t = scheduleBlink(setIsBlackBlinking); return () => clearTimeout(t); },[]);
+  useEffect(() => {
+    if (isTyping) { setIsLookingAtEachOther(true); const t = setTimeout(() => setIsLookingAtEachOther(false), 800); return () => clearTimeout(t); }
+    else setIsLookingAtEachOther(false);
+  },[isTyping]);
+  useEffect(() => {
+    if (password.length > 0 && showPw) {
+      const t = setTimeout(() => { setIsPurplePeeking(true); setTimeout(() => setIsPurplePeeking(false), 800); }, Math.random()*3000+2000);
+      return () => clearTimeout(t);
+    } else setIsPurplePeeking(false);
+  },[password, showPw, isPurplePeeking]);
+
+  const calcPos = (ref) => {
+    if (!ref.current) return {faceX:0,faceY:0,bodySkew:0};
+    const r = ref.current.getBoundingClientRect();
+    const cx = r.left+r.width/2, cy = r.top+r.height/3;
+    const dx = mx-cx, dy = my-cy;
+    return { faceX: Math.max(-15,Math.min(15,dx/20)), faceY: Math.max(-10,Math.min(10,dy/30)), bodySkew: Math.max(-6,Math.min(6,-dx/120)) };
   };
 
-  const handleChartLeave = () => {
-    setActivePoint(null);
-  };
+  const pp = calcPos(purpleRef); const bp = calcPos(blackRef);
+  const yp = calcPos(yellowRef); const op = calcPos(orangeRef);
 
-  return (
-    <div className="space-y-4">
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <p className="text-xs uppercase tracking-[0.26em] text-slate-400">Equity curve</p>
-          <p className="mt-2 font-display text-3xl text-white">
-            {formatCurrency(activePoint ? activePoint.value : lastValue)}
-          </p>
-          {activePoint ? <p className="mt-1 text-sm text-cyan-300">{activePoint.label}</p> : null}
-        </div>
-        <p className="text-sm text-slate-300">Running account balance based on recorded trades</p>
-      </div>
-
-      <div className="chart-shell relative h-64 overflow-hidden rounded-[24px] border border-white/10 bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_50%),linear-gradient(180deg,rgba(255,255,255,0.03),rgba(255,255,255,0.01))] p-4 pt-6">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart
-            data={data}
-            margin={{ top: 20, right: 20, left: 0, bottom: 0 }}
-            onMouseMove={handleChartMove}
-            onMouseLeave={handleChartLeave}
-            onTouchMove={handleChartMove}
-            onTouchEnd={handleChartLeave}
-          >
-            <defs>
-              <linearGradient id="colorValue" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#22d3ee" stopOpacity={0.24} />
-                <stop offset="95%" stopColor="#22d3ee" stopOpacity={0} />
-              </linearGradient>
-            </defs>
-            <XAxis dataKey="label" hide />
-            <YAxis hide domain={[minValue, maxValue]} />
-            <Tooltip
-              isAnimationActive={false}
-              content={({ active, payload, label }) => {
-                if (active && payload && payload.length) {
-                  return (
-                    <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-lg">
-                      <p className="mb-1 text-xs font-medium text-slate-400">{label}</p>
-                      <p className="font-display text-lg font-semibold text-white">
-                        {formatCurrency(payload[0].value as number)}
-                      </p>
-                    </div>
-                  );
-                }
-                return null;
-              }}
-            />
-            <Area
-              type="monotone"
-              dataKey="value"
-              stroke="#22d3ee"
-              strokeWidth={2.5}
-              fillOpacity={1}
-              fill="url(#colorValue)"
-              isAnimationActive={false}
-              activeDot={{
-                r: 6,
-                fill: "#f59e0b",
-                stroke: "#0f172a",
-                strokeWidth: 2,
-              }}
-              dot={false}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
-
-        <div className="pointer-events-none absolute bottom-2 left-4 right-4 flex items-center justify-between">
-          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500 opacity-60">{data[0]?.label}</span>
-          <span className="text-[10px] uppercase tracking-[0.2em] text-slate-500 opacity-60">{data[data.length - 1]?.label}</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function MonthlyBarsChart({ data }: { data: { month: string; value: number }[] }) {
-  if (data.length === 0) {
-    return <div className="flex h-52 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">Monthly performance will appear after your first trade.</div>;
-  }
-
-  const maxValue = Math.max(...data.map((item) => Math.abs(item.value)), 1);
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <p className="text-xs uppercase tracking-[0.26em] text-slate-400">Profit by month</p>
-        <p className="mt-2 text-sm text-slate-300">Stacked monthly performance in USD</p>
-      </div>
-      <div className="grid gap-4">
-        {data.map((item) => (
-          <div key={item.month} className="space-y-2">
-            <div className="flex items-center justify-between text-sm text-slate-300">
-              <span>{item.month}</span>
-              <span className={item.value >= 0 ? "text-emerald-300" : "text-rose-300"}>{formatCurrency(item.value)}</span>
-            </div>
-            <div className="h-3 overflow-hidden rounded-full bg-white/[0.05]">
-              <div
-                className={`h-full rounded-full ${item.value >= 0 ? "bg-[linear-gradient(90deg,#34d399,#22d3ee)]" : "bg-[linear-gradient(90deg,#fb7185,#f97316)]"}`}
-                style={{ width: `${(Math.abs(item.value) / maxValue) * 100}%` }}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function StrategyBars({ data }: { data: { strategy: string; winRate: number; total: number }[] }) {
-  if (data.length === 0) {
-    return <div className="flex h-52 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">Strategy win rate appears once you have logged setups.</div>;
-  }
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <p className="text-xs uppercase tracking-[0.26em] text-slate-400">Win rate by strategy</p>
-        <p className="mt-2 text-sm text-slate-300">See which setups actually pay you</p>
-      </div>
-      <div className="space-y-3">
-        {data.map((item) => (
-          <div key={item.strategy} className="rounded-[22px] border border-white/10 bg-white/[0.035] p-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="font-medium text-white">{item.strategy}</p>
-                <p className="mt-1 text-xs uppercase tracking-[0.22em] text-slate-500">{item.total} trades</p>
-              </div>
-              <p className="font-display text-2xl text-white">{item.winRate}%</p>
-            </div>
-            <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/[0.05]">
-              <div className="h-full rounded-full bg-[linear-gradient(90deg,#f59e0b,#22d3ee,#34d399)]" style={{ width: `${item.winRate}%` }} />
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function OutcomeRing({ data }: { data: { label: Outcome; value: number; color: string }[] }) {
-  const total = data.reduce((sum, item) => sum + item.value, 0);
-
-  if (total === 0) {
-    return <div className="flex h-52 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">Outcome breakdown appears after trades are added.</div>;
-  }
-
-  let start = 0;
-  const gradientStops = data
-    .map((item) => {
-      const percentage = (item.value / total) * 100;
-      const segment = `${item.color} ${start}% ${start + percentage}%`;
-      start += percentage;
-      return segment;
-    })
-    .join(", ");
-
-  return (
-    <div className="grid gap-4 md:grid-cols-[220px_1fr] md:items-center">
-      <div className="flex justify-center">
-        <div
-          className="relative h-44 w-44 rounded-full"
-          style={{ background: `conic-gradient(${gradientStops})` }}
-        >
-          <div className="absolute inset-5 rounded-full border border-white/10 bg-slate-950/95" />
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-            <span className="text-[11px] uppercase tracking-[0.28em] text-slate-400">Outcomes</span>
-            <span className="mt-2 font-display text-3xl text-white">{total}</span>
-            <span className="text-sm text-slate-300">closed trades</span>
-          </div>
-        </div>
-      </div>
-      <div className="space-y-3">
-        {data.map((item) => (
-          <div key={item.label} className="flex items-center justify-between rounded-[20px] border border-white/10 bg-white/[0.035] px-4 py-3">
-            <div className="flex items-center gap-3">
-              <span className="h-3 w-3 rounded-full" style={{ backgroundColor: item.color }} />
-              <span className="text-sm text-white">{item.label}</span>
-            </div>
-            <div className="text-right">
-              <p className="font-medium text-white">{item.value}</p>
-              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">{Math.round((item.value / total) * 100)}%</p>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function HourPerformanceChart({ data }: { data: { hour: string; value: number }[] }) {
-  const relevant = data.filter((item) => item.value !== 0);
-
-  if (relevant.length === 0) {
-    return <div className="flex h-52 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">Time-of-day performance will populate after trades are recorded.</div>;
-  }
-
-  const maxValue = Math.max(...relevant.map((item) => Math.abs(item.value)), 1);
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <p className="text-xs uppercase tracking-[0.26em] text-slate-400">Performance by EST hour</p>
-        <p className="mt-2 text-sm text-slate-300">Shows where your edge appears during the trading day</p>
-      </div>
-      <div className="space-y-3">
-        {relevant.map((item) => (
-          <div key={item.hour} className="grid grid-cols-[58px_1fr_78px] items-center gap-3 text-sm">
-            <span className="text-slate-400">{item.hour}</span>
-            <div className="h-3 overflow-hidden rounded-full bg-white/[0.05]">
-              <div
-                className={`h-full rounded-full ${item.value >= 0 ? "bg-[linear-gradient(90deg,#22d3ee,#34d399)]" : "bg-[linear-gradient(90deg,#fb7185,#f97316)]"}`}
-                style={{ width: `${(Math.abs(item.value) / maxValue) * 100}%` }}
-              />
-            </div>
-            <span className={item.value >= 0 ? "text-emerald-300" : "text-rose-300"}>{formatCurrency(item.value)}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function WeekdayPerformanceChart({ data }: { data: { day: string; value: number; count: number }[] }) {
-  const relevant = data.filter((d) => d.count > 0);
-  if (relevant.length === 0) {
-    return <div className="flex h-52 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">Weekday performance appears after logging trades.</div>;
-  }
-
-  const maxValue = Math.max(...relevant.map((d) => Math.abs(d.value)), 1);
-
-  return (
-    <div className="space-y-4">
-      <div>
-        <p className="text-xs uppercase tracking-[0.26em] text-slate-400">Profit by Day</p>
-        <p className="mt-2 text-sm text-slate-300">Which days yield the best results</p>
-      </div>
-      <div className="grid grid-cols-5 items-end gap-2 h-40">
-        {relevant.map((d) => {
-           const height = Math.abs(d.value) / maxValue * 100;
-           return (
-            <div key={d.day} className="flex flex-col items-center justify-end h-full w-full group relative">
-              <div className="absolute bottom-full mb-2 hidden whitespace-nowrap rounded bg-slate-800 px-2 py-1 text-xs text-white group-hover:block z-10">
-                {d.day}: {formatCurrency(d.value)} ({d.count} trades)
-              </div>
-              <div
-                className={`w-full rounded-t-md transition-all duration-500 ${d.value >= 0 ? "bg-emerald-400/80 hover:bg-emerald-400" : "bg-rose-400/80 hover:bg-rose-400"}`}
-                style={{ height: `${Math.max(height, 5)}%` }}
-              />
-              <span className="mt-2 text-[10px] uppercase tracking-wider text-slate-500">{d.day.substring(0, 3)}</span>
-            </div>
-           );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function TradingCalendar({ trades }: { trades: Trade[] }) {
-  const [currentMonth, setCurrentMonth] = useState(new Date());
-
-  const getDaysInMonth = (date: Date) => {
-    const year = date.getFullYear();
-    const month = date.getMonth();
-    const firstDay = new Date(year, month, 1);
-    const lastDay = new Date(year, month + 1, 0);
-    const daysInMonth = lastDay.getDate();
-    const startingDay = firstDay.getDay();
-
-    return { daysInMonth, startingDay, year, month };
-  };
-
-  const { daysInMonth, startingDay, year, month } = getDaysInMonth(currentMonth);
-
-  const dayMap = useMemo(() => {
-    return trades.reduce<Record<string, { count: number; pnl: number }>>((acc, trade) => {
-      const d = new Date(trade.startDate);
-      const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-      if (!acc[key]) {
-        acc[key] = { count: 0, pnl: 0 };
-      }
-      acc[key].count += 1;
-      acc[key].pnl += trade.pnl;
-      return acc;
-    }, {});
-  }, [trades]);
-
-  const getDayData = (day: number) => {
-    return dayMap[`${year}-${month}-${day}`] ?? { count: 0, pnl: 0 };
-  };
-
-  const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
-
-  const prevMonth = () => setCurrentMonth(new Date(year, month - 1, 1));
-  const nextMonth = () => setCurrentMonth(new Date(year, month + 1, 1));
-
-  const days = [];
-  for (let i = 0; i < startingDay; i++) {
-    days.push(<div key={`empty-${i}`} className="h-20 rounded-[12px] bg-white/[0.02]" />);
-  }
-
-  for (let day = 1; day <= daysInMonth; day++) {
-    const { count, pnl } = getDayData(day);
-    const hasTrades = count > 0;
-
-    days.push(
-      <div
-        key={day}
-        className={`h-20 rounded-[12px] border p-2 transition-colors ${
-          hasTrades
-            ? pnl >= 0
-              ? "border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/15"
-              : "border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/15"
-            : "border-white/5 bg-white/[0.02] hover:bg-white/[0.035]"
-        }`}
-      >
-        <div className="flex items-start justify-between">
-          <span className="text-sm font-medium text-slate-300">{day}</span>
-          {hasTrades ? <span className={`text-xs font-bold ${pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{count}</span> : null}
-        </div>
-        {hasTrades ? (
-          <div className="mt-2">
-            <p className={`text-xs font-semibold ${pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
-              {formatCurrency(pnl)}
-            </p>
-          </div>
-        ) : null}
-      </div>
-    );
-  }
-
-  return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-[0.26em] text-slate-400">Trading Calendar</p>
-          <p className="mt-2 text-sm text-slate-300">Daily trade count and P&L</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button onClick={prevMonth} className="p-2 rounded-full hover:bg-white/10 text-slate-300">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
-          </button>
-          <span className="text-white font-medium min-w-[140px] text-center">
-            {monthNames[month]} {year}
-          </span>
-          <button onClick={nextMonth} className="p-2 rounded-full hover:bg-white/10 text-slate-300">
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
-          </button>
-        </div>
-      </div>
-      
-      <div className="grid grid-cols-7 gap-2">
-        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map(d => (
-          <div key={d} className="text-center text-xs uppercase tracking-wider text-slate-500 py-2">{d}</div>
-        ))}
-        {days}
-      </div>
-      
-      <div className="flex items-center gap-4 text-xs text-slate-400">
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-emerald-500/30 border border-emerald-500/30" />
-          <span>Profitable day</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-rose-500/30 border border-rose-500/30" />
-          <span>Loss day</span>
-        </div>
-        <div className="flex items-center gap-2">
-          <div className="w-3 h-3 rounded bg-white/[0.02] border border-white/5" />
-          <span>No trades</span>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function AdvancedPieChart({ data }: { data: { name: string; value: number; color: string }[] }) {
-  if (data.reduce((sum, item) => sum + item.value, 0) === 0) {
-    return <div className="flex h-64 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">No data available</div>;
-  }
-
-  const COLORS = data.map(d => d.color);
-
-  return (
-    <div className="h-64">
-      <ResponsiveContainer width="100%" height="100%">
-        <PieChart>
-          <Pie
-            data={data}
-            cx="50%"
-            cy="50%"
-            innerRadius={60}
-            outerRadius={80}
-            paddingAngle={5}
-            dataKey="value"
-            stroke="none"
-          >
-            {data.map((_, index) => (
-              <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-            ))}
-          </Pie>
-          <Tooltip
-            content={({ active, payload }) => {
-              if (active && payload && payload.length) {
-                const data = payload[0].payload as { name: string; value: number };
-                const total = data.value;
-                return (
-                  <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
-                    <p className="text-sm font-medium text-white">{data.name}</p>
-                    <p className="text-lg font-semibold text-cyan-300">{total} trades</p>
-                  </div>
-                );
-              }
-              return null;
-            }}
-          />
-          <Legend 
-            verticalAlign="bottom" 
-            height={36}
-            formatter={(value) => <span className="text-sm text-slate-300">{value}</span>}
-          />
-        </PieChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function AdvancedBarChart({ data }: { data: { name: string; value: number }[] }) {
-  if (data.length === 0) {
-    return <div className="flex h-64 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">No data available</div>;
-  }
-
-  return (
-    <div className="h-64">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={data} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
-          <XAxis 
-            dataKey="name" 
-            tick={{ fill: '#94a3b8', fontSize: 12 }}
-            axisLine={false}
-            tickLine={false}
-          />
-          <YAxis 
-            hide={true}
-          />
-          <Tooltip
-            content={({ active, payload, label }) => {
-              if (active && payload && payload.length) {
-                const value = payload[0].value as number;
-                return (
-                  <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
-                    <p className="text-xs text-slate-400 mb-1">{label}</p>
-                    <p className={`text-lg font-semibold ${value >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-                      {formatCurrency(value)}
-                    </p>
-                  </div>
-                );
-              }
-              return null;
-            }}
-          />
-          <Bar 
-            dataKey="value" 
-            radius={[8, 8, 0, 0]}
-          >
-            {data.map((entry, index) => (
-              <Cell 
-                key={`cell-${index}`} 
-                fill={entry.value >= 0 ? '#10b981' : '#ef4444'}
-              />
-            ))}
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function DirectionDonutChart({ trades }: { trades: Trade[] }) {
-  const longTrades = trades.filter(t => t.direction === 'LONG');
-  const shortTrades = trades.filter(t => t.direction === 'SHORT');
-  
-  const longPnL = longTrades.reduce((sum, t) => sum + t.pnl, 0);
-  const shortPnL = shortTrades.reduce((sum, t) => sum + t.pnl, 0);
-  
-  const data = [
-    { name: 'LONG', value: Math.abs(longPnL), color: longPnL >= 0 ? '#10b981' : '#ef4444', pnl: longPnL },
-    { name: 'SHORT', value: Math.abs(shortPnL), color: shortPnL >= 0 ? '#10b981' : '#ef4444', pnl: shortPnL },
-  ].filter(d => d.value > 0);
-
-  if (data.length === 0) {
-    return <div className="flex h-64 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">No trades yet</div>;
-  }
-
-  return (
-    <div className="h-64">
-      <ResponsiveContainer width="100%" height="100%">
-        <PieChart>
-          <Pie
-            data={data}
-            cx="50%"
-            cy="50%"
-            innerRadius={70}
-            outerRadius={90}
-            paddingAngle={5}
-            dataKey="value"
-            stroke="none"
-          >
-            {data.map((entry, index) => (
-              <Cell key={`cell-${index}`} fill={entry.color} />
-            ))}
-          </Pie>
-          <Tooltip
-            content={({ active, payload }) => {
-              if (active && payload && payload.length) {
-                const d = payload[0].payload as typeof data[0];
-                return (
-                  <div className="rounded-xl border border-white/10 bg-slate-900/95 p-3 shadow-xl backdrop-blur-md">
-                    <p className="text-sm font-medium text-white">{d.name}</p>
-                    <p className={`text-lg font-semibold ${d.pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-                      {formatCurrency(d.pnl)}
-                    </p>
-                  </div>
-                );
-              }
-              return null;
-            }}
-          />
-          <Legend 
-            verticalAlign="bottom" 
-            height={36}
-            formatter={(value) => <span className="text-sm text-slate-300">{value}</span>}
-          />
-        </PieChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function AssetHeatmap({ trades }: { trades: Trade[] }) {
-  const assetData = trades.reduce((acc, trade) => {
-    if (!acc[trade.asset]) acc[trade.asset] = { pnl: 0, count: 0, wins: 0 };
-    acc[trade.asset].pnl += trade.pnl;
-    acc[trade.asset].count += 1;
-    if (trade.outcome === 'Win') acc[trade.asset].wins += 1;
-    return acc;
-  }, {} as Record<string, { pnl: number; count: number; wins: number }>);
-  
-  const data = Object.entries(assetData)
-    .map(([name, data]) => ({ name, ...data }))
-    .sort((a, b) => b.pnl - a.pnl);
-
-  if (data.length === 0) {
-    return <div className="flex h-64 items-center justify-center rounded-[24px] border border-dashed border-white/10 text-sm text-slate-500">No asset data</div>;
-  }
-
-  const maxPnl = Math.max(...data.map(d => Math.abs(d.pnl)), 1);
-
-  return (
-    <div className="space-y-3">
-      {data.map((d, i) => (
-        <div key={i} className="group">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-sm font-medium text-white">{d.name}</span>
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-slate-400">{d.count} trades</span>
-              <span className={`text-sm font-semibold ${d.pnl >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>
-                {formatCurrency(d.pnl)}
-              </span>
-            </div>
-          </div>
-          <div className="h-3 bg-gray-800 rounded-full overflow-hidden">
-            <div 
-              className={`h-full rounded-full transition-all duration-500 ${d.pnl >= 0 ? 'bg-gradient-to-r from-emerald-600 to-emerald-400' : 'bg-gradient-to-r from-rose-600 to-rose-400'}`}
-              style={{ width: `${(Math.abs(d.pnl) / maxPnl) * 100}%` }}
-            />
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function AdvancedMetrics({ trades }: { trades: Trade[] }) {
-  if (trades.length === 0) return null;
-  
-  const wins = trades.filter(t => t.pnl > 0);
-  const losses = trades.filter(t => t.pnl <= 0);
-  
-  const avgWin = wins.length > 0 ? wins.reduce((s, t) => s + t.pnl, 0) / wins.length : 0;
-  const avgLoss = losses.length > 0 ? losses.reduce((s, t) => s + t.pnl, 0) / losses.length : 0;
-  
-  // Profit Factor
-  const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
-  const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
-  const profitFactor = grossLoss === 0 ? grossProfit : grossProfit / grossLoss;
-  
-  // Sharpe-like ratio (simplified)
-  const returns = trades.map(t => t.pnl);
-  const avgReturn = returns.reduce((s, r) => s + r, 0) / returns.length;
-  const stdDev = Math.sqrt(returns.reduce((s, r) => s + Math.pow(r - avgReturn, 2), 0) / returns.length);
-  const sharpeRatio = stdDev === 0 ? 0 : avgReturn / stdDev;
-  
-  // Consecutive wins/losses
-  let maxConsecutiveWins = 0;
-  let maxConsecutiveLosses = 0;
-  let currentWins = 0;
-  let currentLosses = 0;
-  
-  const sortedTrades = [...trades].sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
-  sortedTrades.forEach(t => {
-    if (t.pnl > 0) {
-      currentWins++;
-      currentLosses = 0;
-      maxConsecutiveWins = Math.max(maxConsecutiveWins, currentWins);
+  const handleSubmit = async (e) => {
+    e.preventDefault(); setError(""); setBusy(true);
+    await new Promise(r => setTimeout(r,400));
+    const accounts = loadAccounts();
+    if (mode === "signup") {
+      if (!username.trim()) { setError("Username required"); setBusy(false); return; }
+      if (password.length < 6) { setError("Password must be at least 6 characters"); setBusy(false); return; }
+      if (accounts[email]) { setError("Account already exists"); setBusy(false); return; }
+      accounts[email] = { email, username: username.trim(), passHash: hashPass(password), trades: [], darkMode: true, profilePicture: "", preferredAssets: ["XAUUSD"] };
+      saveAccounts(accounts); saveSession(email); onLogin(email);
     } else {
-      currentLosses++;
-      currentWins = 0;
-      maxConsecutiveLosses = Math.max(maxConsecutiveLosses, currentLosses);
+      const acc = accounts[email];
+      if (!acc || acc.passHash !== hashPass(password)) { setError("Invalid email or password"); setBusy(false); return; }
+      saveSession(email); onLogin(email);
     }
-  });
-  
-  // Largest drawdown calculation
-  let peak = 0;
-  let maxDrawdown = 0;
-  let runningTotal = 0;
-  sortedTrades.forEach(t => {
-    runningTotal += t.pnl;
-    if (runningTotal > peak) peak = runningTotal;
-    const drawdown = peak - runningTotal;
-    if (drawdown > maxDrawdown) maxDrawdown = drawdown;
-  });
-  
-  const metrics = [
-    { label: "Avg Win", value: formatCurrency(avgWin), color: "text-emerald-300" },
-    { label: "Avg Loss", value: formatCurrency(avgLoss), color: "text-rose-300" },
-    { label: "Profit Factor", value: profitFactor.toFixed(2), color: profitFactor >= 1.5 ? "text-emerald-300" : profitFactor >= 1 ? "text-amber-300" : "text-rose-300" },
-    { label: "Sharpe Ratio", value: sharpeRatio.toFixed(2), color: sharpeRatio >= 1 ? "text-emerald-300" : sharpeRatio >= 0 ? "text-amber-300" : "text-rose-300" },
-    { label: "Max Consecutive Wins", value: maxConsecutiveWins, color: "text-emerald-300" },
-    { label: "Max Consecutive Losses", value: maxConsecutiveLosses, color: "text-rose-300" },
-    { label: "Max Drawdown", value: formatCurrency(-maxDrawdown), color: "text-rose-300" },
-    { label: "Risk/Reward", value: avgLoss !== 0 ? Math.abs(avgWin / avgLoss).toFixed(2) : "0.00", color: "text-cyan-300" },
-  ];
-  
-  return (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-      {metrics.map((m, i) => (
-        <div key={i} className="rounded-[20px] border border-white/10 bg-white/[0.03] p-4 text-center">
-          <p className="text-xs uppercase tracking-[0.2em] text-slate-500">{m.label}</p>
-          <p className={`mt-2 font-display text-xl font-semibold ${m.color}`}>{m.value}</p>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function InlineEditable({
-  value,
-  type = "text",
-  onChange,
-  className = "",
-  placeholder = "",
-  enabled = true,
-}: {
-  value: string | number;
-  type?: "text" | "number" | "datetime-local";
-  onChange: (value: string) => void;
-  className?: string;
-  placeholder?: string;
-  enabled?: boolean;
-}) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [localValue, setLocalValue] = useState(String(value));
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (isEditing && inputRef.current) {
-      inputRef.current.focus();
-    }
-  }, [isEditing]);
-
-  useEffect(() => {
-    setLocalValue(String(value));
-  }, [value]);
-
-  const handleSave = () => {
-    setIsEditing(false);
-    onChange(localValue);
+    setBusy(false);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === "Enter") {
-      handleSave();
-    } else if (e.key === "Escape") {
-      setLocalValue(String(value));
-      setIsEditing(false);
-    }
-  };
-
-  if (isEditing && enabled) {
-    return (
-      <input
-        ref={inputRef}
-        type={type}
-        value={localValue}
-        onChange={(e) => setLocalValue(e.target.value)}
-        onBlur={handleSave}
-        onKeyDown={handleKeyDown}
-        className={`w-full bg-transparent border-b border-cyan-400/50 outline-none text-white ${className}`}
-        placeholder={placeholder}
-      />
-    );
-  }
+  const lookingAway = password.length > 0 && !showPw;
 
   return (
-    <div
-      onClick={() => enabled && setIsEditing(true)}
-      className={`${enabled ? "cursor-pointer hover:bg-white/5 rounded px-1 -mx-1" : ""} transition ${className}`}
-      title={enabled ? "Click to edit" : ""}
-    >
-      {value}
-    </div>
-  );
-}
+    <div className="min-h-screen grid lg:grid-cols-2 bg-[#080b14]">
+      {/* Left — Characters */}
+      <div className="relative hidden lg:flex flex-col justify-between p-12 overflow-hidden"
+        style={{background:"linear-gradient(135deg,#0d1117 0%,#0f1923 40%,#0a0d1a 100%)"}}>
+        {/* Ambient blobs */}
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 rounded-full opacity-10 blur-3xl pointer-events-none" style={{background:"radial-gradient(circle,#7c3aed,transparent)"}} />
+        <div className="absolute bottom-1/3 right-1/4 w-64 h-64 rounded-full opacity-10 blur-3xl pointer-events-none" style={{background:"radial-gradient(circle,#06b6d4,transparent)"}} />
 
-function TradeDetailSection({
-  trade,
-  currentUser,
-  setUsers,
-  setView,
-  setSelectedTradeId,
-}: {
-  trade: Trade;
-  currentUser: UserAccount;
-  setUsers: React.Dispatch<React.SetStateAction<UserAccount[]>>;
-  setView: (view: View) => void;
-  setSelectedTradeId: (id: string | null) => void;
-}) {
-  const [isEditMode, setIsEditMode] = useState(false);
-  
-  const updateTrade = (updates: Partial<Trade>) => {
-    setUsers((previousUsers) =>
-      previousUsers.map((user) => {
-        if (user.id !== currentUser.id) {
-          return user;
-        }
-        return {
-          ...user,
-          trades: user.trades.map((t) =>
-            t.id === trade.id ? { ...t, ...updates } : t
-          ),
-        };
-      })
-    );
-  };
-
-  const handlePnlChange = (value: string) => {
-    const numValue = Number(value);
-    if (!isNaN(numValue)) {
-      updateTrade({ pnl: numValue });
-    }
-  };
-
-  const handleRoiChange = (value: string) => {
-    const numValue = Number(value);
-    if (!isNaN(numValue)) {
-      updateTrade({ roi: Number(numValue.toFixed(2)) });
-    }
-  };
-
-  const handleLotSizeChange = (value: string) => {
-    const numValue = Number(value);
-    if (!isNaN(numValue) || value === "") {
-      updateTrade({ lotSize: numValue || 0 });
-    }
-  };
-
-  const handleOutcomeChange = (value: string) => {
-    const outcome = value as Outcome;
-    const newPnl = outcome === "Loss" && trade.pnl > 0 ? -trade.pnl : outcome === "Win" && trade.pnl < 0 ? Math.abs(trade.pnl) : trade.pnl;
-    updateTrade({ outcome, pnl: newPnl });
-  };
-
-  const handleRuleFollowedChange = (value: string) => {
-    updateTrade({ ruleFollowed: value === "YES" });
-  };
-
-  const handleDirectionChange = (value: string) => {
-    updateTrade({ direction: value as Direction });
-  };
-
-  const handleTypeChange = (value: string) => {
-    updateTrade({ type: value as TradeType });
-  };
-
-  const handleEmotionChange = (value: string) => {
-    updateTrade({ emotion: value });
-  };
-
-  const handleRatingChange = (value: number) => {
-    updateTrade({ rating: value });
-  };
-
-  const handleNotesChange = (value: string) => {
-    updateTrade({ notes: value });
-  };
-
-  const handleMistakesChange = (value: string) => {
-    updateTrade({ mistakes: value });
-  };
-
-  const handleLessonsChange = (value: string) => {
-    updateTrade({ lessons: value });
-  };
-
-  const handleStartDateChange = (value: string) => {
-    updateTrade({ startDate: value, endDate: value });
-  };
-
-  const handleEndDateChange = (value: string) => {
-    updateTrade({ endDate: value });
-  };
-
-  const handleDelete = () => {
-    const shouldDelete = window.confirm("Delete this trade permanently?");
-    if (!shouldDelete) {
-      return;
-    }
-    setUsers((previousUsers) =>
-      previousUsers.map((user) => {
-        if (user.id !== currentUser.id) {
-          return user;
-        }
-        return {
-          ...user,
-          trades: user.trades.filter((t) => t.id !== trade.id),
-        };
-      })
-    );
-    setSelectedTradeId(null);
-    setView("dashboard");
-  };
-
-  return (
-    <SectionCard
-      title={`${trade.asset} Trade Review`}
-      eyebrow="Trade detail page"
-      action={
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setIsEditMode(!isEditMode)}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-cyan-400/30 bg-cyan-400/10 text-cyan-200 transition hover:bg-cyan-400/20"
-            aria-label={isEditMode ? "Stop editing" : "Edit trade"}
-            title={isEditMode ? "Stop editing" : "Edit trade"}
-          >
-            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-              <path d="M4 20h4l10-10-4-4L4 16v4z" />
-              <path d="M13 7l4 4" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            onClick={handleDelete}
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-rose-400/30 bg-rose-400/10 text-rose-200 transition hover:bg-rose-400/20"
-            aria-label="Delete trade"
-            title="Delete trade"
-          >
-            <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-              <path d="M4 7h16" />
-              <path d="M9 7V5h6v2" />
-              <path d="M7 7l1 13h8l1-13" />
-              <path d="M10 11v6M14 11v6" />
-            </svg>
-          </button>
-          <button type="button" onClick={() => setView("dashboard")} className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-100 transition hover:bg-white/[0.08]">
-            Back to Journal
+        {/* Logo + Back button */}
+        <div className="relative z-20 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{background:"linear-gradient(135deg,#7c3aed,#06b6d4)"}}>
+              <TrendingUp size={20} className="text-white" />
+            </div>
+            <span className="text-white font-bold text-xl tracking-tight">TradeTracker</span>
+          </div>
+          <button onClick={onBack}
+            className="flex items-center gap-2 px-3 py-2 rounded-xl text-white/40 hover:text-white/80 border border-white/8 hover:border-white/20 transition-all duration-200 text-sm group"
+            style={{ background: "rgba(255,255,255,0.04)" }}>
+            <ChevronLeft size={14} className="group-hover:-translate-x-0.5 transition-transform duration-200" />
+            Back
           </button>
         </div>
-      }
-    >
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatTile label="Trade Window" value={formatEST(trade.startDate, { month: "short", day: "numeric" })} hint={formatESTRange(trade.startDate, trade.endDate)} accent="from-cyan-400 via-sky-400 to-cyan-200" />
-        <StatTile label="Outcome" value={trade.outcome} hint={`${trade.direction} on ${trade.timeframe}`} accent="from-emerald-400 via-cyan-300 to-sky-300" />
-        <StatTile label="P/L" value={formatCurrency(trade.pnl)} hint={`ROI ${formatPercent(trade.roi)}`} accent="from-amber-400 via-orange-400 to-rose-400" />
-        <StatTile label="Emotion" value={trade.emotion} hint={`Rating: ${trade.rating}/5`} accent="from-fuchsia-400 via-cyan-300 to-emerald-300" />
+
+        {/* Characters stage */}
+        <div className="relative z-20 flex items-end justify-center" style={{height:420}}>
+          <div className="relative" style={{width:520,height:400}}>
+            {/* Purple */}
+            <div ref={purpleRef} className="absolute bottom-0 transition-all duration-700 ease-in-out"
+              style={{left:60,width:170,height:lookingAway?440:400,backgroundColor:"#6C3FF5",borderRadius:"10px 10px 0 0",zIndex:1,
+                transform:lookingAway?`skewX(${(pp.bodySkew||0)-12}deg) translateX(40px)`:`skewX(${pp.bodySkew||0}deg)`,transformOrigin:"bottom center"}}>
+              <div className="absolute flex gap-8 transition-all duration-700 ease-in-out"
+                style={{left:lookingAway?55:45+(pp.faceX||0),top:lookingAway?65:40+(pp.faceY||0)}}>
+                <EyeBall size={18} pupilSize={7} maxDistance={5} eyeColor="white" pupilColor="#1a0533" isBlinking={isPurpleBlinking}
+                  forceLookX={lookingAway?undefined:isLookingAtEachOther?3:undefined} forceLookY={lookingAway?undefined:isLookingAtEachOther?4:undefined} />
+                <EyeBall size={18} pupilSize={7} maxDistance={5} eyeColor="white" pupilColor="#1a0533" isBlinking={isPurpleBlinking}
+                  forceLookX={lookingAway?undefined:isLookingAtEachOther?3:undefined} forceLookY={lookingAway?undefined:isLookingAtEachOther?4:undefined} />
+              </div>
+            </div>
+            {/* Black */}
+            <div ref={blackRef} className="absolute bottom-0 transition-all duration-700 ease-in-out"
+              style={{left:220,width:115,height:305,backgroundColor:"#1e2030",borderRadius:"8px 8px 0 0",zIndex:2,
+                transform:`skewX(${isLookingAtEachOther?(bp.bodySkew||0)*1.5+10:bp.bodySkew||0}deg)`,transformOrigin:"bottom center"}}>
+              <div className="absolute flex gap-6 transition-all duration-700 ease-in-out"
+                style={{left:isLookingAtEachOther?32:26+(bp.faceX||0),top:isLookingAtEachOther?12:32+(bp.faceY||0)}}>
+                <EyeBall size={16} pupilSize={6} maxDistance={4} eyeColor="white" pupilColor="#1e2030" isBlinking={isBlackBlinking}
+                  forceLookX={isLookingAtEachOther?0:undefined} forceLookY={isLookingAtEachOther?-4:undefined} />
+                <EyeBall size={16} pupilSize={6} maxDistance={4} eyeColor="white" pupilColor="#1e2030" isBlinking={isBlackBlinking}
+                  forceLookX={isLookingAtEachOther?0:undefined} forceLookY={isLookingAtEachOther?-4:undefined} />
+              </div>
+            </div>
+            {/* Orange */}
+            <div ref={orangeRef} className="absolute bottom-0 transition-all duration-700 ease-in-out"
+              style={{left:0,width:230,height:195,zIndex:3,backgroundColor:"#f97316",borderRadius:"115px 115px 0 0",
+                transform:`skewX(${op.bodySkew||0}deg)`,transformOrigin:"bottom center"}}>
+              <div className="absolute flex gap-8 transition-all duration-200 ease-out"
+                style={{left:80+(op.faceX||0),top:88+(op.faceY||0)}}>
+                <Pupil size={12} maxDistance={5} pupilColor="#431407" />
+                <Pupil size={12} maxDistance={5} pupilColor="#431407" />
+              </div>
+            </div>
+            {/* Yellow */}
+            <div ref={yellowRef} className="absolute bottom-0 transition-all duration-700 ease-in-out"
+              style={{left:295,width:135,height:225,backgroundColor:"#eab308",borderRadius:"68px 68px 0 0",zIndex:4,
+                transform:`skewX(${yp.bodySkew||0}deg)`,transformOrigin:"bottom center"}}>
+              <div className="absolute flex gap-6 transition-all duration-200 ease-out"
+                style={{left:50+(yp.faceX||0),top:38+(yp.faceY||0)}}>
+                <Pupil size={12} maxDistance={5} pupilColor="#422006" />
+                <Pupil size={12} maxDistance={5} pupilColor="#422006" />
+              </div>
+              <div className="absolute rounded-full transition-all duration-200 ease-out"
+                style={{width:70,height:4,backgroundColor:"#422006",left:38+(yp.faceX||0),top:86+(yp.faceY||0)}} />
+            </div>
+          </div>
+        </div>
+
+        {/* Footer links */}
+        <div className="relative z-20 flex items-center gap-8 text-sm text-white/30">
+          <span className="hover:text-white/60 cursor-pointer transition-colors">Privacy</span>
+          <span className="hover:text-white/60 cursor-pointer transition-colors">Terms</span>
+          <span className="hover:text-white/60 cursor-pointer transition-colors">Support</span>
+        </div>
       </div>
 
-      <div className="mt-6 grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-        <div className="space-y-4 rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
-              <div className="grid gap-4 md:grid-cols-2">
-            <div>
-              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-3">Execution</p>
-              <div className="space-y-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">Start Date/Time</span>
-                  <InlineEditable value={trade.startDate} type="datetime-local" onChange={handleStartDateChange} className="text-white text-right" enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">End Date/Time</span>
-                  <InlineEditable value={trade.endDate} type="datetime-local" onChange={handleEndDateChange} className="text-white text-right" enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">Lot Size</span>
-                  <InlineEditable value={trade.lotSize || ""} type="number" onChange={handleLotSizeChange} className="text-white text-right" placeholder="0" enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">Type</span>
-                  <InlineEditable value={trade.type} onChange={handleTypeChange} className="text-white text-right" enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">P&L</span>
-                  <InlineEditable value={trade.pnl} type="number" onChange={handlePnlChange} className={`${trade.pnl >= 0 ? "text-emerald-300" : "text-rose-300"} text-right`} enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">ROI</span>
-                  <InlineEditable value={trade.roi} type="number" onChange={handleRoiChange} className={`${trade.roi >= 0 ? "text-emerald-300" : "text-rose-300"} text-right`} enabled={isEditMode} />
-                </div>
+      {/* Right — Form */}
+      <div className="flex items-center justify-center p-8" style={{background:"#080b14"}}>
+        <div className="w-full max-w-md">
+          {/* Mobile header with back button */}
+          <div className="lg:hidden flex items-center justify-between mb-10">
+            <button onClick={onBack}
+              className="flex items-center gap-2 px-3 py-2 rounded-xl text-white/40 hover:text-white/80 border border-white/8 hover:border-white/20 transition-all duration-200 text-sm group"
+              style={{ background: "rgba(255,255,255,0.04)" }}>
+              <ChevronLeft size={14} className="group-hover:-translate-x-0.5 transition-transform duration-200" />
+              Back
+            </button>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background:"linear-gradient(135deg,#7c3aed,#06b6d4)"}}>
+                <TrendingUp size={16} className="text-white" />
               </div>
-            </div>
-            <div>
-              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-3">Discipline</p>
-              <div className="space-y-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">Rule Followed</span>
-                  <InlineEditable value={trade.ruleFollowed ? "YES" : "NO"} onChange={handleRuleFollowedChange} className="text-white text-right" enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">Direction</span>
-                  <InlineEditable value={trade.direction} onChange={handleDirectionChange} className="text-white text-right" enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">Outcome</span>
-                  <InlineEditable value={trade.outcome} onChange={handleOutcomeChange} className="text-white text-right" enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-slate-300">Emotion</span>
-                  <InlineEditable value={trade.emotion} onChange={handleEmotionChange} className="text-white text-right" enabled={isEditMode} />
-                </div>
-                <div className="flex items-center justify-between gap-4">
-                  <span className="text-slate-300">Rating</span>
-                  <div className="flex gap-1">
-                    {Array.from({ length: 5 }, (_, i) => (
-                      <button
-                        key={i}
-                        onClick={() => isEditMode && handleRatingChange(i + 1)}
-                        className={`transition ${isEditMode ? "hover:scale-110" : "cursor-default"}`}
-                        disabled={!isEditMode}
-                      >
-                        <svg
-                          viewBox="0 0 20 20"
-                          fill={i < trade.rating ? "currentColor" : "none"}
-                          className={`h-4 w-4 ${i < trade.rating ? "text-amber-300" : "text-slate-600"}`}
-                          stroke="currentColor"
-                          strokeWidth="1.25"
-                        >
-                          <path d="M10 1.8l2.52 5.11 5.64.82-4.08 3.97.96 5.61L10 14.64 4.96 17.3l.96-5.61L1.84 7.73l5.64-.82L10 1.8z" />
-                        </svg>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
+              <span className="text-white font-bold text-lg">TradeTracker</span>
             </div>
           </div>
 
-          <div className="grid gap-4">
-            <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-2">Notes {isEditMode ? "(click to edit)" : ""}</p>
-              <InlineEditable value={trade.notes} onChange={handleNotesChange} className="text-sm leading-7 text-slate-300 w-full" placeholder="No notes recorded." enabled={isEditMode} />
+          <div className="mb-8">
+            <p className="text-xs font-semibold tracking-widest mb-2" style={{color:"#7c3aed"}}>SECURE ACCESS</p>
+            <div className="flex items-center justify-between">
+              <h1 className="text-3xl font-bold text-white">{mode==="login"?"Welcome back!":"Create account"}</h1>
+              <button onClick={() => { setMode(m => m==="login"?"signup":"login"); setError(""); }}
+                className="text-sm px-4 py-2 rounded-full border border-white/10 text-white/60 hover:text-white hover:border-white/30 transition-all">
+                {mode==="login"?"Sign up":"Sign in"}
+              </button>
             </div>
-            <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-2">Mistakes {isEditMode ? "(click to edit)" : ""}</p>
-              <InlineEditable value={trade.mistakes} onChange={handleMistakesChange} className="text-sm leading-7 text-slate-300 w-full" placeholder="No mistakes recorded." enabled={isEditMode} />
-            </div>
-            <div className="rounded-[24px] border border-white/10 bg-black/20 p-4">
-              <p className="text-xs uppercase tracking-[0.24em] text-slate-500 mb-2">Lessons Learned {isEditMode ? "(click to edit)" : ""}</p>
-              <InlineEditable value={trade.lessons} onChange={handleLessonsChange} className="text-sm leading-7 text-slate-300 w-full" placeholder="No lessons recorded." enabled={isEditMode} />
-            </div>
-          </div>
-        </div>
-
-        <div className="space-y-4">
-          {([
-            ["entry", "Entry charts"],
-            ["exit", "Exit charts"],
-            ["review", "Review screenshots"],
-          ] as [ScreenshotCategory, string][]).map(([category, title]) => (
-            <div key={category} className="rounded-[28px] border border-white/10 bg-white/[0.03] p-5">
-              <div className="flex items-center justify-between gap-4 mb-4">
-                <div>
-                  <p className="font-medium text-white">{title}</p>
-                  <p className="mt-1 text-xs uppercase tracking-[0.22em] text-slate-500">{trade.screenshots[category].length} images</p>
-                </div>
-                <label className="inline-flex cursor-pointer rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-slate-200 transition hover:bg-white/[0.08]">
-                  Upload
-                  <input
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="hidden"
-                    onChange={async (e) => {
-                      const images = await toDataUrls(e.target.files);
-                      if (images.length > 0) {
-                        setUsers((previousUsers) =>
-                          previousUsers.map((user) => {
-                            if (user.id !== currentUser.id) return user;
-                            return {
-                              ...user,
-                              trades: user.trades.map((t) =>
-                                t.id === trade.id
-                                  ? { ...t, screenshots: { ...t.screenshots, [category]: [...t.screenshots[category], ...images] } }
-                                  : t
-                              ),
-                            };
-                          })
-                        );
-                      }
-                      e.target.value = "";
-                    }}
-                  />
-                </label>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {trade.screenshots[category].length === 0 ? (
-                  <div className="rounded-[20px] border border-dashed border-white/10 bg-black/20 px-4 py-12 text-center text-sm text-slate-500 sm:col-span-2">
-                    No images uploaded for this section.
-                  </div>
-                ) : (
-                  trade.screenshots[category].map((image, index) => (
-                    <div key={`${category}-${index}`} className="group relative overflow-hidden rounded-[20px] border border-white/10 bg-slate-950/60">
-                      <img src={image} alt={`${title} ${index + 1}`} className="h-48 w-full object-cover" />
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setUsers((previousUsers) =>
-                            previousUsers.map((user) => {
-                              if (user.id !== currentUser.id) return user;
-                              return {
-                                ...user,
-                                trades: user.trades.map((t) =>
-                                  t.id === trade.id
-                                    ? { ...t, screenshots: { ...t.screenshots, [category]: t.screenshots[category].filter((_, i) => i !== index) } }
-                                    : t
-                                ),
-                              };
-                            })
-                          );
-                        }}
-                        className="absolute right-3 top-3 rounded-full bg-black/60 px-3 py-1 text-xs text-white opacity-0 transition group-hover:opacity-100"
-                      >
-                        Remove
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </SectionCard>
-  );
-}
-
-function App() {
-  const [users, setUsers] = useState<UserAccount[]>(() => loadUsers());
-  const [sessionUserId, setSessionUserId] = useState<string | null>(() => readLocalStorage(SESSION_STORAGE));
-  const [authMode, setAuthMode] = useState<AuthMode>("login");
-  const [authForm, setAuthForm] = useState<AuthFormState>({ name: "", email: "", password: "" });
-  const [authError, setAuthError] = useState("");
-  const [authBusy, setAuthBusy] = useState(false);
-  const [view, setView] = useState<View>("dashboard");
-  const [selectedTradeId, setSelectedTradeId] = useState<string | null>(null);
-  const [tradeForm, setTradeForm] = useState<TradeFormState>(emptyTradeForm);
-  const [filters, setFilters] = useState<Filters>({
-    asset: "All assets",
-    strategy: "All strategies",
-    outcome: "All outcomes",
-    direction: "All directions",
-    startDate: "",
-    endDate: "",
-  });
-  const [tradeError, setTradeError] = useState("");
-  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    localStorage.setItem(USERS_STORAGE, JSON.stringify(users));
-  }, [users]);
-
-  useEffect(() => {
-    if (sessionUserId) {
-      localStorage.setItem(SESSION_STORAGE, sessionUserId);
-      return;
-    }
-
-    localStorage.removeItem(SESSION_STORAGE);
-  }, [sessionUserId]);
-
-  const currentUser = useMemo(() => users.find((user) => user.id === sessionUserId) ?? null, [users, sessionUserId]);
-
-  useEffect(() => {
-    if (sessionUserId && !currentUser) {
-      setSessionUserId(null);
-    }
-  }, [sessionUserId, currentUser]);
-
-  const trades = currentUser?.trades ?? [];
-  const selectedTrade = trades.find((trade) => trade.id === selectedTradeId) ?? null;
-
-  const filterOptions = useMemo(
-    () => ({
-      assets: ["All assets", ...new Set([...assetsPreset, ...trades.map((trade) => trade.asset)])],
-      strategies: ["All strategies", ...new Set([...strategyOptions, ...trades.map((trade) => trade.strategy)])],
-    }),
-    [trades],
-  );
-
-  const filteredTrades = useMemo(
-    () =>
-      trades.filter((trade) => {
-        const tradeTime = new Date(trade.startDate).getTime();
-        const matchesAsset = filters.asset === "All assets" || trade.asset === filters.asset;
-        const matchesStrategy = filters.strategy === "All strategies" || trade.strategy === filters.strategy;
-        const matchesOutcome = filters.outcome === "All outcomes" || trade.outcome === filters.outcome;
-        const matchesDirection = filters.direction === "All directions" || trade.direction === filters.direction;
-        const matchesStart = !filters.startDate || tradeTime >= new Date(filters.startDate).getTime();
-        const matchesEnd = !filters.endDate || tradeTime <= new Date(filters.endDate).getTime() + 86_399_999;
-
-        return matchesAsset && matchesStrategy && matchesOutcome && matchesDirection && matchesStart && matchesEnd;
-      }),
-    [filters, trades],
-  );
-
-  const journalRows = useMemo(() => {
-    const ascending = [...filteredTrades].sort((a, b) => new Date(a.startDate).getTime() - new Date(b.startDate).getTime());
-    let runningTotal = 0;
-
-    return ascending
-      .map((trade) => {
-        runningTotal += trade.pnl;
-        return { trade, runningTotal };
-      })
-      .reverse();
-  }, [filteredTrades]);
-
-  const allAnalytics = useMemo(() => buildTradeAnalytics(trades), [trades]);
-  const filteredAnalytics = useMemo(() => buildTradeAnalytics(filteredTrades), [filteredTrades]);
-
-
-
-  async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setAuthError("");
-    setAuthBusy(true);
-
-    try {
-      const email = authForm.email.trim().toLowerCase();
-      const password = authForm.password.trim();
-      const name = authForm.name.trim();
-
-      if (!email || !password || (authMode === "signup" && !name)) {
-        setAuthError("Complete the form to access your private journal.");
-        return;
-      }
-
-      if (password.length < 6) {
-        setAuthError("Use at least 6 characters for your password.");
-        return;
-      }
-
-      if (authMode === "signup") {
-        const existingUser = users.find((user) => user.email.toLowerCase() === email);
-
-        if (existingUser) {
-          setAuthError("An account with that email already exists.");
-          return;
-        }
-
-        const passwordRecord = await createPasswordRecord(password);
-        const newUser: UserAccount = {
-          id: createId(),
-          name,
-          email,
-          passwordHash: passwordRecord.passwordHash,
-          salt: passwordRecord.salt,
-          trades: sampleTrades(),
-        };
-
-        setUsers((previousUsers) => [...previousUsers, newUser]);
-        setSessionUserId(newUser.id);
-        setView("dashboard");
-        setAuthForm({ name: "", email: "", password: "" });
-        return;
-      }
-
-      const matchedUser = users.find((user) => user.email.toLowerCase() === email);
-
-      if (!matchedUser) {
-        setAuthError("Email or password does not match an existing account.");
-        return;
-      }
-
-      let authenticated = false;
-
-      if (matchedUser.passwordHash && matchedUser.salt) {
-        const submittedHash = await hashPassword(password, matchedUser.salt);
-        authenticated = submittedHash === matchedUser.passwordHash;
-      } else if (matchedUser.legacyPassword) {
-        authenticated = matchedUser.legacyPassword === password;
-
-        if (authenticated) {
-          const passwordRecord = await createPasswordRecord(password);
-          setUsers((previousUsers) =>
-            previousUsers.map((user) =>
-              user.id === matchedUser.id
-                ? {
-                    ...user,
-                    passwordHash: passwordRecord.passwordHash,
-                    salt: passwordRecord.salt,
-                    legacyPassword: undefined,
-                  }
-                : user,
-            ),
-          );
-        }
-      }
-
-      if (!authenticated) {
-        setAuthError("Email or password does not match an existing account.");
-        return;
-      }
-
-      setSessionUserId(matchedUser.id);
-      setView("dashboard");
-      setAuthForm({ name: "", email: "", password: "" });
-    } finally {
-      setAuthBusy(false);
-    }
-  }
-
-  function handleLogout() {
-    setSessionUserId(null);
-    setSelectedTradeId(null);
-    setView("dashboard");
-  }
-
-  async function handleScreenshotUpload(category: ScreenshotCategory, event: ChangeEvent<HTMLInputElement>) {
-    const images = await toDataUrls(event.target.files);
-    setTradeForm((previousState) => ({
-      ...previousState,
-      screenshots: {
-        ...previousState.screenshots,
-        [category]: [...previousState.screenshots[category], ...images],
-      },
-    }));
-
-    event.target.value = "";
-  }
-
-  function removeScreenshot(category: ScreenshotCategory, index: number) {
-    setTradeForm((previousState) => ({
-      ...previousState,
-      screenshots: {
-        ...previousState.screenshots,
-        [category]: previousState.screenshots[category].filter((_, currentIndex) => currentIndex !== index),
-      },
-    }));
-  }
-
-  function handleTradeSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setTradeError("");
-
-    if (!currentUser) {
-      return;
-    }
-
-    const lotSize = tradeForm.lotSize === "" ? 0 : Number(tradeForm.lotSize);
-    const pnl = Number(tradeForm.pnl);
-    const roi = Number(tradeForm.roi);
-
-    if (tradeForm.lotSize !== "" && (Number.isNaN(lotSize) || lotSize <= 0)) {
-      setTradeError("Enter a valid lot size.");
-      return;
-    }
-
-    if (Number.isNaN(pnl)) {
-      setTradeError("Enter a valid P&L value.");
-      return;
-    }
-
-    if (Number.isNaN(roi)) {
-      setTradeError("Enter a valid ROI value.");
-      return;
-    }
-
-    if (new Date(tradeForm.endDate).getTime() < new Date(tradeForm.startDate).getTime()) {
-      setTradeError("End time must be after start time.");
-      return;
-    }
-
-    const newTrade: Trade = {
-      id: createId(),
-      startDate: tradeForm.startDate,
-      endDate: tradeForm.endDate,
-      asset: tradeForm.asset.trim().toUpperCase(),
-      timeframe: tradeForm.timeframe,
-      direction: tradeForm.direction,
-      type: tradeForm.type,
-      lotSize: lotSize || 0,
-      ruleFollowed: tradeForm.ruleFollowed,
-      outcome: tradeForm.outcome,
-      roi: Number(roi.toFixed(2)),
-      pnl: pnl,
-      rating: tradeForm.rating,
-      strategy: "",
-      notes: tradeForm.notes.trim(),
-      emotion: tradeForm.emotion,
-      mistakes: tradeForm.mistakes.trim(),
-      lessons: tradeForm.lessons.trim(),
-      screenshots: tradeForm.screenshots,
-    };
-
-    setUsers((previousUsers) =>
-      previousUsers.map((user) => (user.id === currentUser.id ? { ...user, trades: [newTrade, ...user.trades] } : user)),
-    );
-    setTradeForm(emptyTradeForm());
-    setView("dashboard");
-    setSelectedTradeId(newTrade.id);
-  }
-
-  function openTradeDetail(tradeId: string) {
-    setSelectedTradeId(tradeId);
-    setView("detail");
-  }
-
-  function exportBackupJson() {
-    if (!currentUser) {
-      return;
-    }
-
-    const backup = {
-      exportedAt: new Date().toISOString(),
-      timezone: "EST/EDT display via America/New_York",
-      account: {
-        id: currentUser.id,
-        name: currentUser.name,
-        email: currentUser.email,
-      },
-      trades: currentUser.trades,
-    };
-
-    downloadBlob(
-      `tradetracker-${currentUser.email}-backup.json`,
-      JSON.stringify(backup, null, 2),
-      "application/json;charset=utf-8",
-    );
-  }
-
-  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const content = e.target?.result as string;
-        const backup = JSON.parse(content);
-        
-        // Basic validation
-        if (!backup.account || !Array.isArray(backup.trades)) {
-          alert("Invalid backup file format.");
-          return;
-        }
-
-        if (backup.account.email !== currentUser?.email) {
-            const confirmImport = window.confirm(
-                `This backup belongs to ${backup.account.email}. Do you want to overwrite your current data?`
-            );
-            if (!confirmImport) return;
-        } else {
-             const confirmImport = window.confirm(
-                `Importing data will overwrite your current trades. Continue?`
-            );
-            if (!confirmImport) return;
-        }
-
-        // Update user data
-        const importedUser: UserAccount = {
-             ...currentUser!,
-             trades: backup.trades,
-        };
-
-        setUsers((prev) => prev.map(u => u.id === currentUser!.id ? importedUser : u));
-        setView("dashboard");
-        alert("Data imported successfully.");
-
-      } catch (err) {
-        console.error(err);
-        alert("Failed to parse backup file.");
-      }
-    };
-    reader.readAsText(file);
-    // Reset input
-    if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-    }
-  }
-
-  const liveMetrics = {
-    roi: Number(tradeForm.roi) || 0,
-    pnl: Number(tradeForm.pnl) || 0,
-  };
-
-  if (!currentUser) {
-    return (
-      <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.14),transparent_32%),radial-gradient(circle_at_top_right,rgba(245,158,11,0.12),transparent_28%),linear-gradient(180deg,#06080d,#0a0f18_45%,#06080d)] px-4 py-8 text-white sm:px-6 lg:px-8">
-        <div className="mx-auto grid min-h-[calc(100vh-4rem)] max-w-7xl items-center gap-8 lg:grid-cols-[1.05fr_0.95fr]">
-          <div className="relative overflow-hidden rounded-[36px] border border-white/10 bg-[linear-gradient(135deg,rgba(15,23,42,0.94),rgba(8,12,19,0.92))] p-8 shadow-[0_30px_90px_rgba(0,0,0,0.45)] lg:p-10">
-            <div className="absolute -left-16 top-10 h-44 w-44 rounded-full bg-cyan-400/20 blur-3xl" />
-            <div className="absolute right-0 top-0 h-52 w-52 rounded-full bg-amber-400/12 blur-3xl" />
-            <p className="relative text-[11px] uppercase tracking-[0.34em] text-cyan-200/75">TradeTracker</p>
-            <h1 className="relative mt-4 max-w-xl font-display text-5xl font-semibold leading-[1.02] tracking-tight text-white md:text-6xl">
-              Record every trade like a desk-ready journal.
-            </h1>
-            <p className="relative mt-5 max-w-xl text-lg leading-8 text-slate-300">
-              A colorful trading dashboard for reviewing execution, screenshots, discipline, and performance in one place. Every trade is displayed in EST and your session stays active on this device.
-            </p>
-
-            <div className="relative mt-8 grid gap-4 sm:grid-cols-3">
-              <StatTile label="Journal" value="Private" hint="Stored per account on this browser" accent="from-cyan-400 via-sky-400 to-cyan-300" />
-              <StatTile label="Performance" value="4 charts" hint="Equity, monthly P/L, outcomes, strategy edge" accent="from-amber-400 via-orange-400 to-rose-400" />
-              <StatTile label="Security" value="PBKDF2" hint="Passwords are hashed locally before storage" accent="from-emerald-400 via-cyan-400 to-sky-400" />
-            </div>
-
-            <div className="relative mt-8 rounded-[28px] border border-white/10 bg-white/[0.04] p-5">
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <p className="text-xs uppercase tracking-[0.26em] text-slate-400">What you get</p>
-                  <p className="mt-2 font-display text-2xl text-white">Trading journal, analytics, screenshots, and exports</p>
-                </div>
-                <div className="rounded-full border border-emerald-300/20 bg-emerald-400/10 px-4 py-2 text-xs uppercase tracking-[0.24em] text-emerald-200">
-                  Stay Logged In
-                </div>
-              </div>
-              <div className="mt-5 grid gap-3 text-sm text-slate-300 sm:grid-cols-2">
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">Notion-style trade table with running P/L and trade ratings.</div>
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">Add multiple entry, exit, and review screenshots to each trade.</div>
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">Built-in CSV and JSON downloads for extracting your trading data.</div>
-                <div className="rounded-2xl border border-white/10 bg-black/20 p-4">EST formatting across dashboard, analytics, and trade detail pages.</div>
-              </div>
-            </div>
+            <p className="text-white/40 text-sm mt-1">{mode==="login"?"Enter your credentials to access your journal.":"Start your private trading journal today."}</p>
           </div>
 
-          <div className="rounded-[36px] border border-white/10 bg-[linear-gradient(180deg,rgba(14,17,28,0.96),rgba(6,9,15,0.96))] p-8 shadow-[0_30px_90px_rgba(0,0,0,0.5)] lg:p-10">
-            <div className="flex items-center justify-between gap-4">
+          <form onSubmit={handleSubmit} className="space-y-4">
+            {mode==="signup" && (
               <div>
-                <p className="text-[11px] uppercase tracking-[0.34em] text-slate-400">Secure Access</p>
-                <h2 className="mt-2 font-display text-3xl font-semibold text-white">{authMode === "login" ? "Welcome back" : "Create your journal"}</h2>
+                <label className="block text-xs font-medium text-white/50 mb-1.5 uppercase tracking-wider">Username</label>
+                <input value={username} onChange={e=>setUsername(e.target.value)} placeholder="Your trading name"
+                  className="w-full px-4 py-3 rounded-xl text-white placeholder-white/20 text-sm border border-white/10 outline-none focus:border-violet-500 transition-colors"
+                  style={{background:"#0f1420"}} onFocus={()=>setIsTyping(true)} onBlur={()=>setIsTyping(false)} />
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setAuthMode((previousMode) => (previousMode === "login" ? "signup" : "login"));
-                  setAuthError("");
-                }}
-                className="rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-slate-200 transition hover:bg-white/[0.08]"
-              >
-                {authMode === "login" ? "Create account" : "I have an account"}
-              </button>
+            )}
+            <div>
+              <label className="block text-xs font-medium text-white/50 mb-1.5 uppercase tracking-wider">Email</label>
+              <input type="email" value={email} onChange={e=>setEmail(e.target.value)} placeholder="trader@example.com" required
+                className="w-full px-4 py-3 rounded-xl text-white placeholder-white/20 text-sm border border-white/10 outline-none focus:border-violet-500 transition-colors"
+                style={{background:"#0f1420"}} onFocus={()=>setIsTyping(true)} onBlur={()=>setIsTyping(false)} />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-white/50 mb-1.5 uppercase tracking-wider">Password</label>
+              <div className="relative">
+                <input type={showPw?"text":"password"} value={password} onChange={e=>setPassword(e.target.value)}
+                  placeholder={mode==="signup"?"Minimum 6 characters":"••••••••"} required
+                  className="w-full px-4 py-3 pr-12 rounded-xl text-white placeholder-white/20 text-sm border border-white/10 outline-none focus:border-violet-500 transition-colors"
+                  style={{background:"#0f1420"}} />
+                <button type="button" onClick={()=>setShowPw(v=>!v)} className="absolute right-4 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/70 transition-colors">
+                  {showPw ? <EyeOff size={16}/> : <Eye size={16}/>}
+                </button>
+              </div>
             </div>
 
-            <form onSubmit={(event) => void handleAuthSubmit(event)} className="mt-8 space-y-4">
-              {authMode === "signup" ? (
-                <label className="block space-y-2 text-sm text-slate-300">
-                  <span>Full name</span>
-                  <input
-                    value={authForm.name}
-                    onChange={(event) => setAuthForm((previousState) => ({ ...previousState, name: event.target.value }))}
-                    className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-white outline-none transition focus:border-cyan-300/60"
-                    placeholder="Alex Morgan"
-                  />
-                </label>
-              ) : null}
-
-              <label className="block space-y-2 text-sm text-slate-300">
-                <span>Email</span>
-                <input
-                  type="email"
-                  value={authForm.email}
-                  onChange={(event) => setAuthForm((previousState) => ({ ...previousState, email: event.target.value }))}
-                  className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-white outline-none transition focus:border-cyan-300/60"
-                  placeholder="trader@desk.com"
-                />
-              </label>
-
-              <label className="block space-y-2 text-sm text-slate-300">
-                <span>Password</span>
-                <input
-                  type="password"
-                  value={authForm.password}
-                  onChange={(event) => setAuthForm((previousState) => ({ ...previousState, password: event.target.value }))}
-                  className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-white outline-none transition focus:border-cyan-300/60"
-                  placeholder="Minimum 6 characters"
-                />
-              </label>
-
-              {authError ? <p className="rounded-2xl border border-rose-300/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-200">{authError}</p> : null}
-
-              <div className="rounded-[24px] border border-white/10 bg-white/[0.03] p-4 text-sm text-slate-300">
-                <p className="font-medium text-white">Security note</p>
-                <p className="mt-2 leading-7">
-                  This version keeps your journal on the current browser and keeps you signed in until you log out. Passwords are hashed locally, but true multi-device sync requires a backend service.
-                </p>
-              </div>
-
-              <button
-                type="submit"
-                disabled={authBusy}
-                className="w-full rounded-2xl bg-[linear-gradient(135deg,#22d3ee,#f59e0b)] px-6 py-3 font-medium text-slate-950 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-70"
-              >
-                {authBusy ? "Securing account..." : authMode === "login" ? "Log In" : "Create Account"}
-              </button>
-            </form>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,rgba(34,211,238,0.1),transparent_25%),radial-gradient(circle_at_top_right,rgba(245,158,11,0.12),transparent_26%),radial-gradient(circle_at_bottom,rgba(16,185,129,0.08),transparent_28%),linear-gradient(180deg,#05070b,#09111b_40%,#06080d)] text-white">
-      <div className="mx-auto max-w-[1600px] px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
-        <div className={`grid gap-6 transition-[grid-template-columns] duration-200 ${isSidebarCollapsed ? "xl:grid-cols-[96px_1fr]" : "xl:grid-cols-[300px_1fr]"}`}>
-          <aside className={`transition-[width,padding] duration-200 xl:sticky xl:top-6 xl:h-[calc(100vh-3rem)] rounded-[34px] border border-white/10 bg-[linear-gradient(180deg,rgba(10,14,22,0.96),rgba(6,9,14,0.98))] shadow-[0_18px_48px_rgba(0,0,0,0.34)] flex flex-col ${isSidebarCollapsed ? "w-24 p-4" : "w-full xl:w-80 p-6"}`}>
-            <div className="flex items-center justify-between mb-6">
-              {!isSidebarCollapsed && (
-                 <p className="text-[11px] uppercase tracking-[0.34em] text-cyan-200/80 whitespace-nowrap overflow-hidden">TradeTracker</p>
-              )}
-              <button
-                onClick={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
-                className="p-2 rounded-full hover:bg-white/5 text-slate-400 transition"
-              >
-                {isSidebarCollapsed ? (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 19l9-9-9-9m-9 18l9-9-9-9" /></svg>
-                ) : (
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" /></svg>
-                )}
-              </button>
-            </div>
-
-            {!isSidebarCollapsed && (
-              <div className="rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(34,211,238,0.14),rgba(245,158,11,0.12))] p-5 mb-6">
-                <h1 className="font-display text-2xl font-semibold text-white truncate">{currentUser.name}</h1>
-                <p className="mt-1 text-xs text-slate-300 truncate">{currentUser.email}</p>
+            {error && (
+              <div className="flex items-center gap-2 p-3 rounded-xl border border-red-500/20 bg-red-500/10 text-red-400 text-sm">
+                <AlertCircle size={14}/>{error}
               </div>
             )}
 
-            <nav className="space-y-2 flex-1">
-              {([
-                ["dashboard", "Dashboard", "M3 3h18v18H3zM3 9h18M9 21V9"],
-                ["add", "Add Trade", "M12 5v14M5 12h14"],
-                ["analytics", "Analytics", "M3 3v18h18M18 17l-5-5-5 5-5-5"],
-                ["detail", "Trade Detail", "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"],
-              ] as [View, string, string][]).map(([targetView, label, path]) => {
-                const active = view === targetView;
-                return (
-                  <button
-                    key={targetView}
-                    type="button"
-                    onClick={() => setView(targetView)}
-                    title={isSidebarCollapsed ? label : ""}
-                    className={`w-full rounded-[24px] border transition flex items-center ${
-                      active
-                        ? "border-cyan-300/20 bg-[linear-gradient(135deg,rgba(34,211,238,0.16),rgba(245,158,11,0.12))]"
-                        : "border-white/5 bg-white/[0.02] hover:bg-white/[0.05]"
-                    } ${isSidebarCollapsed ? "justify-center p-4" : "px-4 py-4 text-left gap-3"}`}
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-6 h-6 shrink-0 text-white">
-                        <path strokeLinecap="round" strokeLinejoin="round" d={path} />
-                    </svg>
-                    {!isSidebarCollapsed && (
-                        <div>
-                            <p className="font-medium text-white text-sm">{label}</p>
-                        </div>
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
+            <button type="submit" disabled={busy}
+              className="w-full py-3.5 rounded-xl font-semibold text-sm text-white transition-all disabled:opacity-50 mt-2"
+              style={{background:"linear-gradient(135deg,#7c3aed,#06b6d4)"}}>
+              {busy?"Signing in…":mode==="login"?"Log In":"Create Account"}
+            </button>
+          </form>
 
-            <div className={`mt-6 grid gap-2 ${isSidebarCollapsed ? "justify-center" : ""}`}>
-               {!isSidebarCollapsed ? (
-                <button
-                    type="button"
-                    onClick={() => setView("add")}
-                    className="rounded-2xl bg-[linear-gradient(135deg,#22d3ee,#38bdf8)] px-4 py-3 font-medium text-slate-950 transition hover:brightness-110 mb-2"
-                >
-                    Log New Trade
-                </button>
-               ) : (
-                 <button
-                    type="button"
-                    onClick={() => setView("add")}
-                    title="Log New Trade"
-                    className="rounded-full bg-[linear-gradient(135deg,#22d3ee,#38bdf8)] p-3 text-slate-950 transition hover:brightness-110 mb-2"
-                >
-                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} className="w-6 h-6"><path strokeLinecap="round" strokeLinejoin="round" d="M12 5v14M5 12h14" /></svg>
-                </button>
-               )}
-
-              <div className={`flex ${isSidebarCollapsed ? "flex-col gap-2 items-center" : "flex-row justify-between gap-2"}`}>
-                  <button
-                    type="button"
-                    onClick={exportBackupJson}
-                    title="Download Backup"
-                    className="rounded-xl border border-white/10 bg-white/[0.04] p-3 text-slate-300 transition hover:bg-white/[0.08] hover:text-white"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                  </button>
-                  <label
-                    title="Import Backup"
-                    className="cursor-pointer rounded-xl border border-white/10 bg-white/[0.04] p-3 text-slate-300 transition hover:bg-white/[0.08] hover:text-white"
-                  >
-                     <input
-                        type="file"
-                        accept=".json"
-                        ref={fileInputRef}
-                        onChange={handleFileChange}
-                        className="hidden"
-                     />
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" /></svg>
-                  </label>
-                  <button
-                    type="button"
-                    onClick={handleLogout}
-                    title="Log Out"
-                    className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-3 text-rose-300 transition hover:bg-rose-500/20 hover:text-rose-200"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
-                  </button>
-              </div>
-            </div>
-          </aside>
-
-          <main className="space-y-6">
-
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <StatTile label="Total Trades" value={String(allAnalytics.totalTrades)} hint="All recorded executions in your journal" accent="from-cyan-400 via-sky-400 to-cyan-200" />
-              <StatTile label="Win Rate" value={`${allAnalytics.winRate.toFixed(1)}%`} hint="Percentage of all trades closing positive" accent="from-emerald-400 via-cyan-300 to-sky-300" />
-              <StatTile label="Total P/L" value={formatCurrency(allAnalytics.totalPnL)} hint="Lifetime net profit and loss" accent="from-amber-400 via-orange-400 to-rose-400" />
-              <StatTile label="Average ROI" value={formatPercent(allAnalytics.averageROI)} hint="Average percentage return per trade" accent="from-fuchsia-400 via-cyan-300 to-emerald-300" />
-            </div>
-
-            {view === "dashboard" ? (
-              <>
-                <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
-                  <SectionCard title="Performance Curve" eyebrow="Account momentum">
-                    <MiniLineChart data={filteredAnalytics.equityCurve} />
-                  </SectionCard>
-                  <SectionCard title="Outcome Mix" eyebrow="Current filters">
-                    <OutcomeRing data={filteredAnalytics.outcomeBreakdown} />
-                  </SectionCard>
-                </div>
-
-                <div className="grid gap-6 xl:grid-cols-3">
-                  <SectionCard title="Monthly Performance" eyebrow="Color-coded P/L">
-                    <MonthlyBarsChart data={filteredAnalytics.profitByMonth} />
-                  </SectionCard>
-                  <SectionCard title="Time-of-Day Edge" eyebrow="EST analysis">
-                    <HourPerformanceChart data={filteredAnalytics.hourlyPerformance} />
-                  </SectionCard>
-                  <SectionCard title="Strategy Scoreboard" eyebrow="Setup quality">
-                    <StrategyBars data={filteredAnalytics.winRateByStrategy.slice(0, 5)} />
-                  </SectionCard>
-                </div>
-
-                <SectionCard title="Trading Calendar" eyebrow="Monthly activity view">
-                  <TradingCalendar trades={filteredTrades} />
-                </SectionCard>
-
-                <SectionCard title="Advanced Performance Metrics" eyebrow="Deep analytics">
-                  <AdvancedMetrics trades={filteredTrades} />
-                </SectionCard>
-
-                <SectionCard
-                  title="Trade Journal"
-                  eyebrow="Notion-style database"
-                >
-                  <div className="grid gap-4 rounded-[28px] border border-white/10 bg-white/[0.03] p-4 lg:grid-cols-6">
-                    <SelectField label="Asset" value={filters.asset} options={filterOptions.assets} onChange={(value) => setFilters((previousState) => ({ ...previousState, asset: value }))} />
-                    <SelectField label="Strategy" value={filters.strategy} options={filterOptions.strategies} onChange={(value) => setFilters((previousState) => ({ ...previousState, strategy: value }))} />
-                    <SelectField label="Outcome" value={filters.outcome} options={["All outcomes", "Win", "Loss", "Breakeven"]} onChange={(value) => setFilters((previousState) => ({ ...previousState, outcome: value }))} />
-                    <SelectField label="Direction" value={filters.direction} options={["All directions", "LONG", "SHORT"]} onChange={(value) => setFilters((previousState) => ({ ...previousState, direction: value }))} />
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>Start date</span>
-                      <input type="date" value={filters.startDate} onChange={(event) => setFilters((previousState) => ({ ...previousState, startDate: event.target.value }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" />
-                    </label>
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>End date</span>
-                      <input type="date" value={filters.endDate} onChange={(event) => setFilters((previousState) => ({ ...previousState, endDate: event.target.value }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" />
-                    </label>
-                  </div>
-
-                  <div className="mt-6 overflow-hidden rounded-[28px] border border-white/10 bg-[#070c13]">
-                    <div className="overflow-x-auto">
-                      <table className="w-full min-w-[1350px] border-collapse text-left">
-                        <thead className="bg-white/[0.03] text-[11px] uppercase tracking-[0.24em] text-slate-400">
-                          <tr>
-                            <th className="px-4 py-4 font-medium">Date EST</th>
-                            <th className="px-4 py-4 font-medium">Asset</th>
-                            <th className="px-4 py-4 font-medium">Timeframe</th>
-                            <th className="px-4 py-4 font-medium">Direction</th>
-                            <th className="px-4 py-4 font-medium">Type</th>
-                            <th className="px-4 py-4 font-medium">Lot Size</th>
-                            <th className="px-4 py-4 font-medium">Rule Followed</th>
-                            <th className="px-4 py-4 font-medium">Outcome</th>
-                            <th className="px-4 py-4 font-medium">ROI</th>
-                            <th className="px-4 py-4 font-medium">P/L</th>
-                            <th className="px-4 py-4 font-medium">Total P/L</th>
-                            <th className="px-4 py-4 font-medium">Rating</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {journalRows.length === 0 ? (
-                            <tr>
-                              <td colSpan={12} className="px-4 py-14 text-center text-sm text-slate-500">
-                                No trades match the current filters.
-                              </td>
-                            </tr>
-                          ) : (
-                            journalRows.map(({ trade, runningTotal }) => (
-                              <tr
-                                key={trade.id}
-                                onClick={() => openTradeDetail(trade.id)}
-                                className="cursor-pointer border-t border-white/6 text-sm text-slate-200 transition hover:bg-white/[0.04]"
-                              >
-                                <td className="px-4 py-4 align-top text-slate-300">{formatESTRange(trade.startDate, trade.endDate)}</td>
-                                <td className="px-4 py-4 align-top">
-                                  <div>
-                                    <p className="font-medium text-white">{trade.asset}</p>
-                                    <p className="mt-1 text-xs uppercase tracking-[0.2em] text-slate-500">{trade.strategy}</p>
-                                  </div>
-                                </td>
-                                <td className="px-4 py-4 align-top text-slate-300">{trade.timeframe}</td>
-                                <td className="px-4 py-4 align-top"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${getDirectionClass(trade.direction)}`}>{trade.direction}</span></td>
-                                <td className="px-4 py-4 align-top text-slate-300">{trade.type}</td>
-                                <td className="px-4 py-4 align-top text-slate-300">{trade.lotSize}</td>
-                                <td className="px-4 py-4 align-top text-slate-300">{trade.ruleFollowed ? "YES" : "NO"}</td>
-                                <td className="px-4 py-4 align-top"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-medium ${getOutcomeClass(trade.outcome)}`}>{trade.outcome}</span></td>
-                                <td className={`px-4 py-4 align-top ${trade.roi >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{formatPercent(trade.roi)}</td>
-                                <td className={`px-4 py-4 align-top ${trade.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{formatCurrency(trade.pnl)}</td>
-                                <td className={`px-4 py-4 align-top ${runningTotal >= 0 ? "text-cyan-200" : "text-rose-300"}`}>{formatCurrency(runningTotal)}</td>
-                                <td className="px-4 py-4 align-top"><StarRating rating={trade.rating} /></td>
-                              </tr>
-                            ))
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                  </div>
-                </SectionCard>
-              </>
-            ) : null}
-
-            {view === "add" ? (
-              <SectionCard title="Log a Trade" eyebrow="Execution journal entry">
-                <form onSubmit={handleTradeSubmit} className="space-y-6">
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>Start date and time</span>
-                      <input type="datetime-local" value={tradeForm.startDate} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, startDate: event.target.value }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" />
-                    </label>
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>End date and time</span>
-                      <input type="datetime-local" value={tradeForm.endDate} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, endDate: event.target.value }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" />
-                    </label>
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>Asset</span>
-                      <input list="asset-options" value={tradeForm.asset} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, asset: event.target.value.toUpperCase() }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" placeholder="XAUUSD" />
-                      <datalist id="asset-options">
-                        {assetsPreset.map((asset) => (
-                          <option key={asset} value={asset} />
-                        ))}
-                      </datalist>
-                    </label>
-                    <SelectField label="Execution timeframe" value={tradeForm.timeframe} options={timeframeOptions} onChange={(value) => setTradeForm((previousState) => ({ ...previousState, timeframe: value }))} />
-                  </div>
-
-                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                    <SelectField label="Direction" value={tradeForm.direction} options={["LONG", "SHORT"]} onChange={(value) => setTradeForm((previousState) => ({ ...previousState, direction: value as Direction }))} />
-                    <SelectField label="Type" value={tradeForm.type} options={["Exit", "Stop Loss", "Take Profit"]} onChange={(value) => setTradeForm((previousState) => ({ ...previousState, type: value as TradeType }))} />
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>Lot size</span>
-                      <input type="number" step="0.01" value={tradeForm.lotSize} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, lotSize: event.target.value }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" />
-                    </label>
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>P&L ($)</span>
-                      <input 
-                        type="number" 
-                        step="0.01" 
-                        value={tradeForm.pnl} 
-                        onChange={(event) => setTradeForm((previousState) => ({ ...previousState, pnl: event.target.value }))} 
-                        className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" 
-                        placeholder="Enter P&L amount"
-                      />
-                    </label>
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>ROI (%)</span>
-                      <input 
-                        type="number" 
-                        step="0.01" 
-                        value={tradeForm.roi} 
-                        onChange={(event) => setTradeForm((previousState) => ({ ...previousState, roi: event.target.value }))} 
-                        className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60" 
-                        placeholder="Enter ROI manually"
-                      />
-                    </label>
-                    <SelectField label="Outcome" value={tradeForm.outcome} options={["Win", "Loss", "Breakeven"]} onChange={(value) => {
-                      const outcome = value as Outcome;
-                      const currentPnl = Number(tradeForm.pnl) || 0;
-                      // Auto-convert P&L to negative when outcome is Loss
-                      const newPnl = outcome === "Loss" && currentPnl > 0 
-                        ? String(-Math.abs(currentPnl)) 
-                        : outcome === "Win" && currentPnl < 0 
-                          ? String(Math.abs(currentPnl))
-                          : tradeForm.pnl;
-                      setTradeForm((previousState) => ({ ...previousState, outcome, pnl: newPnl }));
-                    }} />
-                    <SelectField label="Emotion during trade" value={tradeForm.emotion} options={emotionOptions} onChange={(value) => setTradeForm((previousState) => ({ ...previousState, emotion: value }))} />
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>Rule followed</span>
-                      <select value={tradeForm.ruleFollowed ? "YES" : "NO"} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, ruleFollowed: event.target.value === "YES" }))} className="w-full rounded-2xl border border-white/10 bg-slate-950/80 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-300/60">
-                        <option value="YES">YES</option>
-                        <option value="NO">NO</option>
-                      </select>
-                    </label>
-                    <label className="space-y-2 text-sm text-slate-300">
-                      <span>Rating</span>
-                      <input type="range" min="1" max="5" value={tradeForm.rating} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, rating: Number(event.target.value) }))} className="w-full accent-cyan-300" />
-                      <StarRating rating={tradeForm.rating} />
-                    </label>
-                  </div>
-
-                  <div className="grid gap-4 lg:grid-cols-3">
-                    <label className="space-y-2 text-sm text-slate-300 lg:col-span-2">
-                      <span>Notes about the trade</span>
-                      <textarea value={tradeForm.notes} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, notes: event.target.value }))} className="min-h-36 w-full rounded-[24px] border border-white/10 bg-slate-950/80 px-4 py-3 text-sm leading-7 text-white outline-none transition focus:border-cyan-300/60" />
-                    </label>
-                    <div className="grid gap-4">
-                      <label className="space-y-2 text-sm text-slate-300">
-                        <span>Mistakes</span>
-                        <textarea value={tradeForm.mistakes} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, mistakes: event.target.value }))} className="min-h-28 w-full rounded-[24px] border border-white/10 bg-slate-950/80 px-4 py-3 text-sm leading-7 text-white outline-none transition focus:border-cyan-300/60" />
-                      </label>
-                      <label className="space-y-2 text-sm text-slate-300">
-                        <span>Lessons learned</span>
-                        <textarea value={tradeForm.lessons} onChange={(event) => setTradeForm((previousState) => ({ ...previousState, lessons: event.target.value }))} className="min-h-28 w-full rounded-[24px] border border-white/10 bg-slate-950/80 px-4 py-3 text-sm leading-7 text-white outline-none transition focus:border-cyan-300/60" />
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="grid gap-4 lg:grid-cols-3">
-                    {([
-                      ["entry", "Entry chart screenshots"],
-                      ["exit", "Exit chart screenshots"],
-                      ["review", "Trade review screenshots"],
-                    ] as [ScreenshotCategory, string][]).map(([category, label]) => (
-                      <div key={category} className="rounded-[28px] border border-white/10 bg-white/[0.03] p-4">
-                        <div className="flex items-center justify-between gap-4">
-                          <div>
-                            <p className="font-medium text-white">{label}</p>
-                            <p className="mt-1 text-xs uppercase tracking-[0.22em] text-slate-500">Multiple images supported</p>
-                          </div>
-                          <label className="inline-flex cursor-pointer rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-xs uppercase tracking-[0.22em] text-slate-200 transition hover:bg-white/[0.08]">
-                            Upload
-                            <input type="file" accept="image/*" multiple className="hidden" onChange={(event) => void handleScreenshotUpload(category, event)} />
-                          </label>
-                        </div>
-                        <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                          {tradeForm.screenshots[category].length === 0 ? (
-                            <div className="rounded-[20px] border border-dashed border-white/10 bg-black/20 px-4 py-10 text-center text-sm text-slate-500 sm:col-span-2">
-                              No screenshots uploaded yet.
-                            </div>
-                          ) : (
-                            tradeForm.screenshots[category].map((image, imageIndex) => (
-                              <div key={`${category}-${imageIndex}`} className="group relative overflow-hidden rounded-[20px] border border-white/10 bg-slate-950/60">
-                                <img src={image} alt={`${label} ${imageIndex + 1}`} className="h-36 w-full object-cover" />
-                                <button type="button" onClick={() => removeScreenshot(category, imageIndex)} className="absolute right-3 top-3 rounded-full bg-black/60 px-3 py-1 text-xs text-white opacity-0 transition group-hover:opacity-100">
-                                  Remove
-                                </button>
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {tradeError ? <p className="rounded-2xl border border-rose-300/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-200">{tradeError}</p> : null}
-
-                  <div className="flex flex-col gap-4 rounded-[28px] border border-white/10 bg-[linear-gradient(135deg,rgba(34,211,238,0.12),rgba(245,158,11,0.12),rgba(16,185,129,0.08))] p-5 lg:flex-row lg:items-center lg:justify-between">
-                    <div>
-                      <p className="font-display text-2xl font-semibold text-white">Trade Summary</p>
-                      <p className="mt-2 text-sm text-slate-200">
-                        You entered: {formatPercent(liveMetrics.roi)} ROI and {formatCurrency(liveMetrics.pnl)} P/L.
-                      </p>
-                      <p className="mt-2 text-xs uppercase tracking-[0.24em] text-slate-400">Displayed in EST on the dashboard after save</p>
-                    </div>
-                    <button type="submit" className="rounded-2xl bg-[linear-gradient(135deg,#22d3ee,#f59e0b)] px-6 py-3 font-medium text-slate-950 transition hover:brightness-110">
-                      Save Trade to Journal
-                    </button>
-                  </div>
-                </form>
-              </SectionCard>
-            ) : null}
-
-            {view === "analytics" ? (
-              <>
-                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-                  <StatTile label="Filtered Trades" value={String(filteredAnalytics.totalTrades)} hint="Respects current dashboard filters" accent="from-cyan-400 via-sky-400 to-cyan-200" />
-                  <StatTile label="Filtered Win Rate" value={`${filteredAnalytics.winRate.toFixed(1)}%`} hint="Win ratio for visible trades" accent="from-emerald-400 via-cyan-300 to-sky-300" />
-                  <StatTile label="Filtered P/L" value={formatCurrency(filteredAnalytics.totalPnL)} hint="Net result of filtered trades" accent="from-amber-400 via-orange-400 to-rose-400" />
-                  <StatTile label="Avg ROI" value={formatPercent(filteredAnalytics.averageROI)} hint="Average return in the filtered set" accent="from-fuchsia-400 via-cyan-300 to-emerald-300" />
-                  <StatTile label="Best Trade" value={filteredAnalytics.bestTrade ? filteredAnalytics.bestTrade.asset : "N/A"} hint={filteredAnalytics.bestTrade ? formatCurrency(filteredAnalytics.bestTrade.pnl) : "No trade found"} accent="from-emerald-400 via-lime-300 to-cyan-300" />
-                  <StatTile label="Worst Trade" value={filteredAnalytics.worstTrade ? filteredAnalytics.worstTrade.asset : "N/A"} hint={filteredAnalytics.worstTrade ? formatCurrency(filteredAnalytics.worstTrade.pnl) : "No trade found"} accent="from-rose-400 via-orange-400 to-amber-300" />
-                  <StatTile label="Expectancy" value={formatCurrency(filteredAnalytics.expectancy)} hint="Avg profit per trade" accent="from-indigo-400 via-purple-400 to-pink-400" />
-                  <StatTile label="Avg Win/Loss" value={filteredAnalytics.totalTrades > 0 ? (filteredAnalytics.winRate / (100 - filteredAnalytics.winRate)).toFixed(2) : "0.00"} hint="Win/Loss Ratio estimate" accent="from-teal-400 via-emerald-400 to-cyan-400" />
-                </div>
-
-                <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
-                  <SectionCard title="Equity Curve" eyebrow="Cumulative performance">
-                    <MiniLineChart data={filteredAnalytics.equityCurve} />
-                  </SectionCard>
-                  <SectionCard title="Outcome Distribution" eyebrow="Interactive pie chart">
-                    <AdvancedPieChart data={filteredAnalytics.outcomeBreakdown.map(o => ({ name: o.label, value: o.value, color: o.color }))} />
-                  </SectionCard>
-                </div>
-
-                <div className="grid gap-6 xl:grid-cols-[1fr_1fr]">
-                  <SectionCard title="Profit by Month" eyebrow="Monthly curve">
-                    <AdvancedBarChart data={filteredAnalytics.profitByMonth.map(m => ({ name: m.month, value: m.value }))} />
-                  </SectionCard>
-                  <SectionCard title="Win Rate by Strategy" eyebrow="Setup quality">
-                    <StrategyBars data={filteredAnalytics.winRateByStrategy} />
-                  </SectionCard>
-                </div>
-
-                <div className="grid gap-6 xl:grid-cols-3">
-                    <SectionCard title="Performance by EST Hour" eyebrow="Market timing">
-                        <HourPerformanceChart data={filteredAnalytics.hourlyPerformance} />
-                    </SectionCard>
-                    <SectionCard title="Weekday Performance" eyebrow="Best trading days">
-                        <WeekdayPerformanceChart data={filteredAnalytics.weekdayPerformance} />
-                    </SectionCard>
-                    <SectionCard title="Direction Performance" eyebrow="LONG vs SHORT">
-                        <DirectionDonutChart trades={filteredTrades} />
-                    </SectionCard>
-                </div>
-
-                <SectionCard title="Asset Performance Heatmap" eyebrow="Profitability by instrument">
-                  <AssetHeatmap trades={filteredTrades} />
-                </SectionCard>
-              </>
-            ) : null}
-
-            {view === "detail" ? (
-              selectedTrade ? (
-                <TradeDetailSection
-                  trade={selectedTrade}
-                  currentUser={currentUser}
-                  setUsers={setUsers}
-                  setView={setView}
-                  setSelectedTradeId={setSelectedTradeId}
-                />
-              ) : (
-                <SectionCard title="Trade Detail" eyebrow="No trade selected">
-                  <div className="rounded-[28px] border border-dashed border-white/10 bg-white/[0.03] px-4 py-16 text-center text-slate-400">
-                    Select a row from the journal dashboard to open a full trade review.
-                  </div>
-                </SectionCard>
-              )
-            ) : null}
-          </main>
+          <div className="mt-6 p-4 rounded-xl border border-white/5 text-xs text-white/30" style={{background:"#0a0d18"}}>
+            <span className="text-white/50 font-medium">🔒 Security note: </span>
+            Your journal is private to this browser. Passwords are hashed locally before storage. Use the export feature to back up your data across devices.
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-export { App };
+// ─── Inline Editable ──────────────────────────────────────────────────────────
+function InlineEdit({ value, onSave, type="text", options=null, dark=true }) {
+  const [editing, setEditing] = useState(false);
+  const [val, setVal] = useState(value);
+  const inputRef = useRef(null);
+  useEffect(() => { setVal(value); },[value]);
+  useEffect(() => { if (editing && inputRef.current) inputRef.current.focus(); },[editing]);
+
+  const save = () => { setEditing(false); if (val !== value) onSave(val); };
+
+  const base = dark
+    ? "bg-[#1a1d2e] border-[#2a2d3e] text-white"
+    : "bg-white border-gray-200 text-gray-900";
+
+  if (!editing) return (
+    <span onClick={()=>setEditing(true)} className={`cursor-pointer px-2 py-0.5 rounded hover:bg-white/10 transition-colors min-w-[40px] inline-block ${!dark?"hover:bg-gray-100 text-gray-900":""}`}>
+      {value||<span className="opacity-30 italic text-xs">click to edit</span>}
+    </span>
+  );
+
+  if (options) return (
+    <select value={val} onChange={e=>setVal(e.target.value)} onBlur={save}
+      className={`px-2 py-0.5 rounded border text-sm outline-none ${base}`} ref={inputRef}>
+      {options.map(o => <option key={o} value={o}>{o}</option>)}
+    </select>
+  );
+
+  return (
+    <input ref={inputRef} value={val} onChange={e=>setVal(e.target.value)}
+      onBlur={save} onKeyDown={e=>{ if(e.key==="Enter") save(); if(e.key==="Escape"){ setVal(value); setEditing(false); } }}
+      className={`px-2 py-0.5 rounded border text-sm outline-none focus:border-violet-500 ${base}`}
+      style={{minWidth:80}} type={type} />
+  );
+}
+
+// ─── Star Rating ──────────────────────────────────────────────────────────────
+function StarRating({ rating, onRate=null, size=16 }) {
+  return (
+    <span className="flex gap-0.5">
+      {[1,2,3,4,5].map(i => (
+        <Star key={i} size={size} fill={i<=rating?"#f59e0b":"none"} stroke={i<=rating?"#f59e0b":"#4b5563"}
+          className={onRate?"cursor-pointer hover:scale-110 transition-transform":""} onClick={()=>onRate&&onRate(i)} />
+      ))}
+    </span>
+  );
+}
+
+// ─── Stat Tile ────────────────────────────────────────────────────────────────
+function StatTile({ label, value, sub="", color="#7c3aed", icon: Icon, dark=true }) {
+  const bg = dark ? "#0f1117" : "#ffffff";
+  const border = dark ? "#1e2130" : "#e5e7eb";
+  const textMain = dark ? "#ffffff" : "#111827";
+  const textSub = dark ? "#6b7280" : "#9ca3af";
+  return (
+    <div className="rounded-2xl p-5 flex flex-col gap-3 transition-all hover:scale-[1.01]"
+      style={{background:bg, border:`1px solid ${border}`, boxShadow: dark?"0 0 0 0 transparent":"0 1px 3px rgba(0,0,0,0.08)"}}>
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-widest" style={{color:textSub}}>{label}</span>
+        {Icon && <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{background:color+"22"}}><Icon size={15} style={{color}} /></div>}
+      </div>
+      <div className="text-2xl font-bold tracking-tight" style={{color:textMain}}>{value}</div>
+      {sub && <div className="text-xs" style={{color:textSub}}>{sub}</div>}
+    </div>
+  );
+}
+
+// ─── Section Card ─────────────────────────────────────────────────────────────
+function SectionCard({ title, subtitle="", children, dark=true, extra=null }) {
+  const bg = dark ? "#0f1117" : "#ffffff";
+  const border = dark ? "#1e2130" : "#e5e7eb";
+  const textMain = dark ? "#ffffff" : "#111827";
+  const textSub = dark ? "#6b7280" : "#9ca3af";
+  return (
+    <div className="rounded-2xl p-5" style={{background:bg,border:`1px solid ${border}`}}>
+      <div className="flex items-center justify-between mb-4">
+        <div>
+          <h3 className="font-semibold text-sm" style={{color:textMain}}>{title}</h3>
+          {subtitle && <p className="text-xs mt-0.5" style={{color:textSub}}>{subtitle}</p>}
+        </div>
+        {extra}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+// ─── Chart Tooltip ────────────────────────────────────────────────────────────
+function DarkTooltip({ active, payload, label, prefix="$", dark=true }) {
+  if (!active || !payload?.length) return null;
+  const bg = dark ? "#1a1d2e" : "#ffffff";
+  const border = dark ? "#2a2d3e" : "#e5e7eb";
+  const textMain = dark ? "#ffffff" : "#111827";
+  const textSub = dark ? "#9ca3af" : "#6b7280";
+  return (
+    <div className="rounded-xl px-3 py-2 text-xs shadow-xl" style={{background:bg,border:`1px solid ${border}`}}>
+      {label && <div className="font-semibold mb-1" style={{color:textSub}}>{label}</div>}
+      {payload.map((p,i) => (
+        <div key={i} className="flex items-center gap-2" style={{color:textMain}}>
+          <span className="w-2 h-2 rounded-full inline-block" style={{background:p.color||p.fill||"#7c3aed"}} />
+          <span>{p.name||""}: <strong>{prefix}{typeof p.value==="number"?p.value.toFixed(2):p.value}</strong></span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Main App ─────────────────────────────────────────────────────────────────
+export default function App() {
+  const [session, setSession] = useState<string|null>(loadSession);
+  const [accounts, setAccounts] = useState<Record<string,UserAccount>>(loadAccounts);
+  const [page, setPage] = useState<Page>("dashboard");
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [showLanding, setShowLanding] = useState(() => !loadSession());
+  const [selectedTrade, setSelectedTrade] = useState<Trade|null>(null);
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [editMode, setEditMode] = useState(false);
+  const [mobileNav, setMobileNav] = useState(false);
+  const [filterAsset, setFilterAsset] = useState("All");
+  const [filterOutcome, setFilterOutcome] = useState("All");
+  const [filterDirection, setFilterDirection] = useState("All");
+  const [calMonth, setCalMonth] = useState(new Date());
+  const [statsView, setStatsView] = useState<"days"|"weeks"|"months">("days");
+
+  const currentUser = session ? accounts[session] : null;
+  const dm = currentUser?.darkMode ?? true;
+
+  const mutate = useCallback((fn: (u: UserAccount) => void) => {
+    if (!session) return;
+    setAccounts(prev => {
+      const next = { ...prev };
+      next[session] = { ...next[session] };
+      fn(next[session]);
+      saveAccounts(next);
+      return next;
+    });
+  }, [session]);
+
+  const handleLogin = (email: string) => {
+    const acc = loadAccounts();
+    setAccounts(acc);
+    setSession(email);
+    saveSession(email);
+  };
+
+  const handleLogout = () => { setSession(null); saveSession(null); setPage("dashboard"); };
+  const toggleDark = () => mutate(u => { u.darkMode = !u.darkMode; });
+
+  const trades = currentUser?.trades ?? [];
+
+  // ─── Filters ───────────────────────────────────────────────────────────────
+  const filtered = trades.filter(t =>
+    (filterAsset==="All" || t.asset===filterAsset) &&
+    (filterOutcome==="All" || t.outcome===filterOutcome) &&
+    (filterDirection==="All" || t.direction===filterDirection)
+  );
+
+  // ─── Analytics ─────────────────────────────────────────────────────────────
+  const wins = trades.filter(t=>t.outcome==="Win").length;
+  const losses = trades.filter(t=>t.outcome==="Loss").length;
+  const winRate = trades.length ? ((wins/trades.length)*100).toFixed(1) : "0.0";
+  const totalPL = trades.reduce((s,t)=>s+parseFloat(t.pl||"0"),0);
+  const avgROI = trades.length ? (trades.reduce((s,t)=>s+parseFloat(t.roi||"0"),0)/trades.length).toFixed(1) : "0.0";
+  const bestTrade = trades.reduce((b,t)=>parseFloat(t.pl||"0")>parseFloat(b?.pl||"-99999")?t:b, null as Trade|null);
+  const worstTrade = trades.reduce((b,t)=>parseFloat(t.pl||"0")<parseFloat(b?.pl||"99999")?t:b, null as Trade|null);
+
+  // Daily P&L (sum per day)
+  const dailyPLMap: Record<string,number> = {};
+  trades.forEach(t => {
+    const day = t.startDate ? new Date(t.startDate).toLocaleDateString("en-US",{timeZone:"America/New_York"}) : "Unknown";
+    dailyPLMap[day] = (dailyPLMap[day]||0) + parseFloat(t.pl||"0");
+  });
+
+  // Equity curve
+  const equityCurve = (() => {
+    let running = 0;
+    return [...trades].sort((a,b)=>new Date(a.startDate).getTime()-new Date(b.startDate).getTime()).map(t => {
+      running += parseFloat(t.pl||"0");
+      return { date: fmtDate(t.startDate), pl: parseFloat(t.pl||"0"), equity: running };
+    });
+  })();
+
+  // Monthly P&L
+  const monthlyMap: Record<string,number> = {};
+  trades.forEach(t => {
+    if (!t.startDate) return;
+    const k = new Date(t.startDate).toLocaleDateString("en-US",{timeZone:"America/New_York",month:"short",year:"2-digit"});
+    monthlyMap[k] = (monthlyMap[k]||0) + parseFloat(t.pl||"0");
+  });
+  const monthlyData = Object.entries(monthlyMap).map(([m,pl])=>({m,pl}));
+
+  // Weekday P&L
+  const days = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
+  const weekdayMap: Record<string,{pl:number,count:number}> = {};
+  days.forEach(d=>weekdayMap[d]={pl:0,count:0});
+  trades.forEach(t => {
+    if (!t.startDate) return;
+    const d = days[new Date(t.startDate).getDay()];
+    weekdayMap[d].pl += parseFloat(t.pl||"0");
+    weekdayMap[d].count++;
+  });
+  const weekdayData = days.map(d=>({day:d,...weekdayMap[d]}));
+
+  // Hour data
+  const hourMap: Record<number,{pl:number,count:number}> = {};
+  for(let h=0;h<24;h++) hourMap[h]={pl:0,count:0};
+  trades.forEach(t => {
+    if (!t.startDate) return;
+    const h = new Date(t.startDate).getHours();
+    hourMap[h].pl += parseFloat(t.pl||"0");
+    hourMap[h].count++;
+  });
+  const hourData = Object.entries(hourMap).map(([h,v])=>({hour:`${h}:00`,...v}));
+
+  // Asset data
+  const assetMap: Record<string,{pl:number,count:number}> = {};
+  trades.forEach(t => {
+    if (!assetMap[t.asset]) assetMap[t.asset]={pl:0,count:0};
+    assetMap[t.asset].pl += parseFloat(t.pl||"0");
+    assetMap[t.asset].count++;
+  });
+  const assetData = Object.entries(assetMap).map(([asset,v])=>({asset,...v})).sort((a,b)=>b.pl-a.pl);
+
+  // Outcome distribution
+  const outcomeData = [
+    {name:"Win",value:wins,color:"#10b981"},
+    {name:"Loss",value:losses,color:"#ef4444"},
+    {name:"Breakeven",value:trades.filter(t=>t.outcome==="Breakeven").length,color:"#6b7280"},
+  ].filter(d=>d.value>0);
+
+  // Direction data
+  const dirData = [
+    {dir:"LONG",pl:trades.filter(t=>t.direction==="LONG").reduce((s,t)=>s+parseFloat(t.pl||"0"),0),count:trades.filter(t=>t.direction==="LONG").length},
+    {dir:"SHORT",pl:trades.filter(t=>t.direction==="SHORT").reduce((s,t)=>s+parseFloat(t.pl||"0"),0),count:trades.filter(t=>t.direction==="SHORT").length},
+  ];
+
+  // Statistics chart data (trades per hour for selected day/week/month)
+  const statsData = hourData.map(h => ({ time:h.hour, value: h.pl, avg: h.count*10 }));
+
+  // Calendar
+  const calYear = calMonth.getFullYear(); const calMonthIdx = calMonth.getMonth();
+  const daysInMonth = new Date(calYear,calMonthIdx+1,0).getDate();
+  const firstDay = new Date(calYear,calMonthIdx,1).getDay();
+  const calDayMap: Record<string,{pl:number,count:number}> = {};
+  trades.forEach(t => {
+    if (!t.startDate) return;
+    const d = new Date(t.startDate);
+    if (d.getFullYear()===calYear && d.getMonth()===calMonthIdx) {
+      const k = d.getDate().toString();
+      if (!calDayMap[k]) calDayMap[k]={pl:0,count:0};
+      calDayMap[k].pl += parseFloat(t.pl||"0");
+      calDayMap[k].count++;
+    }
+  });
+
+  // ─── Form state ────────────────────────────────────────────────────────────
+  const emptyForm = {
+    asset:"XAUUSD", timeframe:"1m", direction:"LONG" as "LONG"|"SHORT",
+    tradeType:"Market", lotSize:"", ruleFollowed:"YES" as "YES"|"NO",
+    outcome:"Win" as "Win"|"Loss"|"Breakeven", roi:"", pl:"",
+    rating:5, startDate: toLocalDT(new Date().toISOString()),
+    endDate: toLocalDT(new Date().toISOString()),
+    notes:"", mistakes:"", lessons:"", emotion:"Focused",
+    screenshots:[] as string[]
+  };
+  const [form, setForm] = useState(emptyForm);
+  const [formScreenshots, setFormScreenshots] = useState<string[]>([]);
+  const screenshotInputRef = useRef<HTMLInputElement>(null);
+
+  const setField = (k: string, v: any) => {
+    setForm(prev => {
+      const next = {...prev, [k]:v};
+      // auto negative on loss
+      if (k==="outcome") {
+        if (v==="Loss") {
+          if (next.pl && !next.pl.startsWith("-")) next.pl = "-"+next.pl;
+          if (next.roi && !next.roi.startsWith("-")) next.roi = "-"+next.roi;
+        } else if (v==="Win") {
+          if (next.pl) next.pl = next.pl.replace(/^-+/,"");
+          if (next.roi) next.roi = next.roi.replace(/^-+/,"");
+        }
+      }
+      if (k==="pl" && prev.outcome==="Loss" && v && !v.startsWith("-")) next.pl = "-"+v;
+      if (k==="roi" && prev.outcome==="Loss" && v && !v.startsWith("-")) next.roi = "-"+v;
+      // auto-fill end date
+      if (k==="startDate") next.endDate = v;
+      return next;
+    });
+  };
+
+  const handleScreenshotUpload = (e: React.ChangeEvent<HTMLInputElement>, isForm=true) => {
+    const files = Array.from(e.target.files||[]);
+    files.forEach(file => {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const dataUrl = ev.target?.result as string;
+        if (isForm) setFormScreenshots(prev => [...prev, dataUrl]);
+        else if (selectedTrade) {
+          mutate(u => {
+            const idx = u.trades.findIndex(t=>t.id===selectedTrade.id);
+            if (idx>=0) { u.trades[idx].screenshots = [...(u.trades[idx].screenshots||[]),dataUrl]; }
+          });
+          setSelectedTrade(prev => prev ? {...prev, screenshots:[...(prev.screenshots||[]),dataUrl]} : prev);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+    e.target.value = "";
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.asset.trim()) return;
+    const trade: Trade = { ...form, id: uid(), screenshots: formScreenshots };
+    mutate(u => { u.trades.unshift(trade); });
+    setForm(emptyForm);
+    setFormScreenshots([]);
+    setPage("dashboard");
+  };
+
+  const deleteTrade = (id: string) => {
+    mutate(u => { u.trades = u.trades.filter(t=>t.id!==id); });
+    setDetailOpen(false); setSelectedTrade(null);
+  };
+
+  const updateTrade = (id: string, field: string, value: any) => {
+    mutate(u => {
+      const idx = u.trades.findIndex(t=>t.id===id);
+      if (idx>=0) {
+        (u.trades[idx] as any)[field] = value;
+        if (field==="outcome") {
+          const pl = parseFloat(u.trades[idx].pl||"0");
+          const roi = parseFloat(u.trades[idx].roi||"0");
+          if (value==="Loss") { u.trades[idx].pl=Math.abs(pl)<0?pl.toString():(-Math.abs(pl)).toString(); u.trades[idx].roi=(-Math.abs(roi)).toString(); }
+          if (value==="Win") { u.trades[idx].pl=Math.abs(pl).toString(); u.trades[idx].roi=Math.abs(roi).toString(); }
+        }
+        setSelectedTrade({...u.trades[idx]});
+      }
+    });
+  };
+
+  const exportData = () => {
+    if (!currentUser) return;
+    const blob = new Blob([JSON.stringify({accounts:{[session!]:currentUser}},null,2)],{type:"application/json"});
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `tradetracker-${session}-${Date.now()}.json`; a.click();
+  };
+
+  const importData = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target?.result as string);
+        const importedAccounts = data.accounts || {};
+        setAccounts(prev => { const next = {...prev,...importedAccounts}; saveAccounts(next); return next; });
+      } catch {}
+    };
+    reader.readAsText(file); e.target.value="";
+  };
+
+  const profilePicRef = useRef<HTMLInputElement>(null);
+  const handleProfilePic = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => { mutate(u => { u.profilePicture = ev.target?.result as string; }); };
+    reader.readAsDataURL(file); e.target.value="";
+  };
+
+  // ─── Theme ─────────────────────────────────────────────────────────────────
+  const bg = dm ? "#070a10" : "#f1f5f9";
+  const sidebarBg = dm ? "#0a0d16" : "#ffffff";
+  const sidebarBorder = dm ? "#1a1d2e" : "#e2e8f0";
+  const textMain = dm ? "#ffffff" : "#0f172a";
+  const textSub = dm ? "#6b7280" : "#64748b";
+  const cardBg = dm ? "#0f1117" : "#ffffff";
+  const cardBorder = dm ? "#1e2130" : "#e2e8f0";
+  const inputBg = dm ? "#0a0d18" : "#f8fafc";
+  const inputBorder = dm ? "#1e2130" : "#cbd5e1";
+
+  if (showLanding && !session) {
+    return <LandingPage onEnter={() => setShowLanding(false)} />;
+  }
+
+  if (!session || !currentUser) {
+    return <AnimatedAuthPage onLogin={(email) => { handleLogin(email); setShowLanding(false); }} onBack={() => setShowLanding(true)} />;
+  }
+
+  // ─── Common input style ────────────────────────────────────────────────────
+  const inputCls = `w-full px-3 py-2.5 rounded-xl text-sm border outline-none transition-colors focus:border-violet-500`;
+  const inputStyle = { background:inputBg, borderColor:inputBorder, color:textMain };
+  const labelCls = `block text-xs font-semibold uppercase tracking-wider mb-1.5`;
+  const labelStyle = { color: textSub };
+
+  const assetList = [...new Set(["XAUUSD", ...ASSETS])];
+
+  // ── Lock body scroll for dashboard (sidebar fixed, main scrolls) ──────────
+  useEffect(() => {
+    document.body.classList.remove("landing");
+    document.body.classList.add("dashboard");
+    document.documentElement.style.overflow = "hidden";
+    document.documentElement.style.height = "100%";
+    document.body.style.overflow = "hidden";
+    document.body.style.height = "100%";
+    const root = document.getElementById("root");
+    if (root) { root.style.height = "100%"; root.style.overflow = "hidden"; }
+    return () => {
+      document.body.classList.remove("dashboard");
+      document.documentElement.style.overflow = "";
+      document.documentElement.style.height = "";
+      document.body.style.overflow = "";
+      document.body.style.height = "";
+      if (root) { root.style.height = ""; root.style.overflow = ""; }
+    };
+  }, []);
+
+  // ─── Render ────────────────────────────────────────────────────────────────
+  return (
+    <div className="flex h-screen overflow-hidden" style={{background:bg, fontFamily:"'Inter',system-ui,sans-serif"}}>
+
+      {/* ── Sidebar ── */}
+      <aside className="flex-shrink-0 flex flex-col transition-all duration-300 relative z-40 h-screen overflow-y-auto"
+        style={{width:sidebarOpen?220:72, background:sidebarBg, borderRight:`1px solid ${sidebarBorder}`}}>
+
+        {/* Logo */}
+        <div className="flex items-center gap-3 px-4 py-5 border-b" style={{borderColor:sidebarBorder}}>
+          <div className="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style={{background:"linear-gradient(135deg,#7c3aed,#06b6d4)"}}>
+            <TrendingUp size={18} className="text-white" />
+          </div>
+          {sidebarOpen && <span className="font-bold text-sm tracking-tight" style={{color:textMain}}>TradeTracker</span>}
+        </div>
+
+        {/* Profile */}
+        <div className={`flex ${sidebarOpen?"items-center gap-3":"flex-col items-center"} px-3 py-4 border-b`} style={{borderColor:sidebarBorder}}>
+          <div className="relative flex-shrink-0">
+            <div onClick={()=>profilePicRef.current?.click()}
+              className="w-10 h-10 rounded-xl cursor-pointer overflow-hidden flex items-center justify-center text-sm font-bold text-white"
+              style={{background:currentUser.profilePicture?"transparent":"linear-gradient(135deg,#7c3aed,#06b6d4)"}}>
+              {currentUser.profilePicture ? <img src={currentUser.profilePicture} className="w-full h-full object-cover" /> : (currentUser.username?.[0]?.toUpperCase()||"T")}
+            </div>
+            <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2" style={{background:"#10b981",borderColor:sidebarBg}} />
+            <input ref={profilePicRef} type="file" accept="image/*" className="hidden" onChange={handleProfilePic} />
+          </div>
+          {sidebarOpen && (
+            <div className="overflow-hidden">
+              <div className="text-sm font-semibold truncate" style={{color:textMain}}>{currentUser.username}</div>
+              <div className="text-xs truncate" style={{color:textSub}}>{currentUser.email}</div>
+            </div>
+          )}
+        </div>
+
+        {/* Nav */}
+        <nav className="flex-1 px-2 py-3 space-y-1">
+          {NAV_ITEMS.map(item => {
+            const Icon = item.icon; const active = page===item.id;
+            return (
+              <button key={item.id} onClick={()=>setPage(item.id)}
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition-all ${sidebarOpen?"":"justify-center"}`}
+                style={{background:active?(dm?"#1a1040":"#ede9fe"):""  , color:active?"#a78bfa":(dm?"#6b7280":"#64748b")}}>
+                <Icon size={18} />
+                {sidebarOpen && <span>{item.label}</span>}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Bottom controls */}
+        <div className="px-2 py-3 space-y-1 border-t" style={{borderColor:sidebarBorder}}>
+          <button onClick={toggleDark} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all ${sidebarOpen?"":"justify-center"}`} style={{color:textSub}}>
+            {dm ? <Sun size={16}/> : <Moon size={16}/>}
+            {sidebarOpen && <span>{dm?"Light Mode":"Dark Mode"}</span>}
+          </button>
+          <button onClick={exportData} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all ${sidebarOpen?"":"justify-center"}`} style={{color:textSub}}>
+            <Download size={16}/>
+            {sidebarOpen && <span>Export</span>}
+          </button>
+          <label className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all cursor-pointer ${sidebarOpen?"":"justify-center"}`} style={{color:textSub}}>
+            <Upload size={16}/>{sidebarOpen && <span>Import</span>}
+            <input type="file" accept=".json" className="hidden" onChange={importData} />
+          </label>
+          <button onClick={handleLogout} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all ${sidebarOpen?"":"justify-center"}`} style={{color:"#ef4444"}}>
+            <LogOut size={16}/>{sidebarOpen && <span>Log Out</span>}
+          </button>
+          <button onClick={()=>setSidebarOpen(v=>!v)} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all ${sidebarOpen?"":"justify-center"}`} style={{color:textSub}}>
+            {sidebarOpen ? <ChevronLeft size={16}/> : <ChevronRight size={16}/>}
+            {sidebarOpen && <span>Collapse</span>}
+          </button>
+        </div>
+      </aside>
+
+      {/* ── Main ── */}
+      <main className="flex-1 h-screen overflow-y-auto" style={{minWidth:0, overscrollBehavior:"contain", WebkitOverflowScrolling:"touch"}}>
+
+        {/* ── DASHBOARD ── */}
+        {page==="dashboard" && (
+          <div className="p-6 space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-2xl font-bold" style={{color:textMain}}>Dashboard</h1>
+                <p className="text-sm mt-0.5" style={{color:textSub}}>{new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric"})}</p>
+              </div>
+              <button onClick={()=>setPage("add")} className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white transition-all hover:scale-105" style={{background:"linear-gradient(135deg,#7c3aed,#06b6d4)"}}>
+                <PlusCircle size={16}/> Log Trade
+              </button>
+            </div>
+
+            {/* Stats */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <StatTile label="Total Trades" value={trades.length} sub="All recorded" icon={Activity} color="#7c3aed" dark={dm} />
+              <StatTile label="Win Rate" value={`${winRate}%`} sub={`${wins}W / ${losses}L`} icon={Target} color="#10b981" dark={dm} />
+              <StatTile label="Total P&L" value={fmtMoney(totalPL)} sub="Net profit/loss" icon={DollarSign} color={totalPL>=0?"#10b981":"#ef4444"} dark={dm} />
+              <StatTile label="Avg ROI" value={`${avgROI}%`} sub="Per trade average" icon={Percent} color="#f59e0b" dark={dm} />
+            </div>
+
+            {/* Equity Curve + Outcome */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+              <div className="lg:col-span-2">
+                <SectionCard title="Equity Curve" subtitle="Running account balance" dark={dm}>
+                  {equityCurve.length > 0 ? (
+                    <ResponsiveContainer width="100%" height={200}>
+                      <AreaChart data={equityCurve} margin={{left:0,right:0,top:5,bottom:0}}>
+                        <defs>
+                          <linearGradient id="eqGrad" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#7c3aed" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                        <XAxis dataKey="date" tick={{fontSize:10,fill:textSub}} />
+                        <YAxis tick={{fontSize:10,fill:textSub}} />
+                        <Tooltip content={<DarkTooltip dark={dm} />} />
+                        <Area type="monotone" dataKey="equity" name="Equity" stroke="#7c3aed" fill="url(#eqGrad)" strokeWidth={2} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-[200px] flex flex-col items-center justify-center text-center" style={{color:textSub}}>
+                      <TrendingUp size={32} className="opacity-30 mb-2"/>
+                      <p className="text-sm">No trades yet — log your first trade!</p>
+                    </div>
+                  )}
+                </SectionCard>
+              </div>
+              <SectionCard title="Outcome Mix" subtitle="Win/Loss/Breakeven" dark={dm}>
+                {outcomeData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={200}>
+                    <PieChart>
+                      <Pie data={outcomeData} cx="50%" cy="50%" innerRadius={55} outerRadius={80} dataKey="value">
+                        {outcomeData.map((e,i)=><Cell key={i} fill={e.color}/>)}
+                      </Pie>
+                      <Tooltip formatter={(v,n)=>[v,n]} contentStyle={{background:dm?"#1a1d2e":"#fff",border:`1px solid ${cardBorder}`,borderRadius:12,fontSize:12,color:textMain}} />
+                      <Legend iconSize={8} wrapperStyle={{fontSize:12,color:textSub}} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="h-[200px] flex items-center justify-center" style={{color:textSub}}>
+                    <p className="text-sm opacity-50">No data yet</p>
+                  </div>
+                )}
+              </SectionCard>
+            </div>
+
+            {/* Statistics Chart */}
+            <SectionCard title="Statistics" subtitle="P&L by time of day"
+              dark={dm}
+              extra={
+                <div className="flex gap-1">
+                  {(["days","weeks","months"] as const).map(v => (
+                    <button key={v} onClick={()=>setStatsView(v)}
+                      className="px-3 py-1 rounded-full text-xs font-medium transition-all capitalize"
+                      style={{background:statsView===v?(dm?"#1a1040":"#ede9fe"):"transparent",color:statsView===v?"#a78bfa":textSub}}>
+                      {v}
+                    </button>
+                  ))}
+                </div>
+              }>
+              <ResponsiveContainer width="100%" height={180}>
+                <LineChart data={statsData} margin={{left:0,right:0,top:5,bottom:0}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                  <XAxis dataKey="time" tick={{fontSize:10,fill:textSub}} />
+                  <YAxis tick={{fontSize:10,fill:textSub}} />
+                  <Tooltip content={<DarkTooltip dark={dm} />} />
+                  <Line type="monotone" dataKey="value" name="P&L" stroke="#7c3aed" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="avg" name="Avg" stroke="#f59e0b" strokeWidth={1.5} dot={false} strokeDasharray="4 4" />
+                </LineChart>
+              </ResponsiveContainer>
+            </SectionCard>
+
+            {/* Weekday + Direction */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <SectionCard title="Weekday Performance" subtitle="Total P&L by day of week" dark={dm}>
+                <ResponsiveContainer width="100%" height={160}>
+                  <BarChart data={weekdayData} margin={{left:0,right:0,top:5,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                    <XAxis dataKey="day" tick={{fontSize:10,fill:textSub}} />
+                    <YAxis tick={{fontSize:10,fill:textSub}} />
+                    <Tooltip content={<DarkTooltip dark={dm} />} />
+                    <Bar dataKey="pl" name="P&L" radius={[4,4,0,0]}>
+                      {weekdayData.map((d,i)=><Cell key={i} fill={d.pl>=0?"#10b981":"#ef4444"}/>)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </SectionCard>
+              <SectionCard title="LONG vs SHORT" subtitle="Performance by direction" dark={dm}>
+                <ResponsiveContainer width="100%" height={160}>
+                  <BarChart data={dirData} margin={{left:0,right:0,top:5,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                    <XAxis dataKey="dir" tick={{fontSize:11,fill:textSub}} />
+                    <YAxis tick={{fontSize:10,fill:textSub}} />
+                    <Tooltip content={<DarkTooltip dark={dm} />} />
+                    <Bar dataKey="pl" name="P&L" radius={[6,6,0,0]}>
+                      {dirData.map((d,i)=><Cell key={i} fill={d.pl>=0?"#7c3aed":"#ef4444"}/>)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </SectionCard>
+            </div>
+
+            {/* Journal Table */}
+            <SectionCard title="Trade Journal" subtitle={`${filtered.length} trades`} dark={dm}
+              extra={
+                <div className="flex gap-2 flex-wrap">
+                  {[
+                    {label:"Asset",val:filterAsset,set:setFilterAsset,opts:["All",...[...new Set(trades.map(t=>t.asset))]]},
+                    {label:"Outcome",val:filterOutcome,set:setFilterOutcome,opts:["All","Win","Loss","Breakeven"]},
+                    {label:"Dir",val:filterDirection,set:setFilterDirection,opts:["All","LONG","SHORT"]},
+                  ].map(f=>(
+                    <select key={f.label} value={f.val} onChange={e=>f.set(e.target.value)}
+                      className="px-3 py-1.5 rounded-xl text-xs border outline-none"
+                      style={{background:inputBg,borderColor:inputBorder,color:textMain}}>
+                      {f.opts.map(o=><option key={o} value={o}>{o}</option>)}
+                    </select>
+                  ))}
+                </div>
+              }>
+              <div className="overflow-x-auto -mx-5 px-5">
+                <table className="w-full text-xs min-w-[900px]">
+                  <thead>
+                    <tr style={{borderBottom:`1px solid ${cardBorder}`}}>
+                      {["Date","Asset","TF","Dir","Type","Lot","Rule","Outcome","ROI","P&L","Daily P&L","⭐",""].map(h=>(
+                        <th key={h} className="text-left py-2 px-2 font-semibold" style={{color:textSub}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filtered.length === 0 ? (
+                      <tr><td colSpan={13} className="py-10 text-center" style={{color:textSub}}>No trades yet. Click "Log Trade" to add your first.</td></tr>
+                    ) : filtered.map(t => {
+                      const dayKey = t.startDate ? new Date(t.startDate).toLocaleDateString("en-US",{timeZone:"America/New_York"}) : "";
+                      const dayPL = dailyPLMap[dayKey]||0;
+                      return (
+                        <tr key={t.id} onClick={()=>{ setSelectedTrade(t); setDetailOpen(true); setEditMode(false); }}
+                          className="cursor-pointer transition-colors hover:bg-white/5 rounded-xl"
+                          style={{borderBottom:`1px solid ${cardBorder}22`}}>
+                          <td className="py-2 px-2" style={{color:textSub}}>{fmtDate(t.startDate)}</td>
+                          <td className="py-2 px-2 font-semibold" style={{color:textMain}}>{t.asset}</td>
+                          <td className="py-2 px-2" style={{color:textSub}}>{t.timeframe}</td>
+                          <td className="py-2 px-2">
+                            <span className="px-2 py-0.5 rounded-full text-xs font-bold" style={{background:t.direction==="LONG"?"#10b98122":"#ef444422",color:t.direction==="LONG"?"#10b981":"#ef4444"}}>{t.direction}</span>
+                          </td>
+                          <td className="py-2 px-2" style={{color:textSub}}>{t.tradeType}</td>
+                          <td className="py-2 px-2" style={{color:textSub}}>{t.lotSize||"—"}</td>
+                          <td className="py-2 px-2">
+                            <span style={{color:t.ruleFollowed==="YES"?"#10b981":"#ef4444"}}>{t.ruleFollowed}</span>
+                          </td>
+                          <td className="py-2 px-2">
+                            <span className="px-2 py-0.5 rounded-full text-xs font-bold"
+                              style={{background:t.outcome==="Win"?"#10b98122":t.outcome==="Loss"?"#ef444422":"#6b728022",
+                                color:t.outcome==="Win"?"#10b981":t.outcome==="Loss"?"#ef4444":"#9ca3af"}}>
+                              {t.outcome}
+                            </span>
+                          </td>
+                          <td className="py-2 px-2 font-mono" style={{color:parseFloat(t.roi||"0")>=0?"#10b981":"#ef4444"}}>{t.roi?`${t.roi}%`:"—"}</td>
+                          <td className="py-2 px-2 font-mono font-bold" style={{color:parseFloat(t.pl||"0")>=0?"#10b981":"#ef4444"}}>
+                            {t.pl ? fmtMoney(parseFloat(t.pl)) : "—"}
+                          </td>
+                          <td className="py-2 px-2 font-mono font-bold" style={{color:dayPL>=0?"#10b981":"#ef4444"}}>
+                            {fmtMoney(dayPL)}
+                          </td>
+                          <td className="py-2 px-2"><StarRating rating={t.rating} size={12} /></td>
+                          <td className="py-2 px-2">
+                            <button onClick={e=>{e.stopPropagation();if(confirm("Delete this trade?"))deleteTrade(t.id);}} className="p-1 rounded hover:text-red-400 transition-colors" style={{color:textSub}}><Trash2 size={13}/></button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </SectionCard>
+          </div>
+        )}
+
+        {/* ── ADD TRADE ── */}
+        {page==="add" && (
+          <div className="p-6 max-w-3xl mx-auto">
+            <div className="mb-6">
+              <h1 className="text-2xl font-bold" style={{color:textMain}}>Log a Trade</h1>
+              <p className="text-sm mt-1" style={{color:textSub}}>Record your trade details below</p>
+            </div>
+            <form onSubmit={handleSubmit} className="space-y-5">
+              <div className="rounded-2xl p-5 space-y-4" style={{background:cardBg,border:`1px solid ${cardBorder}`}}>
+                <h3 className="font-semibold text-sm" style={{color:textMain}}>Trade Details</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Asset with dropdown */}
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Asset *</label>
+                    <div className="relative">
+                      <select value={form.asset} onChange={e=>setField("asset",e.target.value)}
+                        className={inputCls} style={inputStyle}>
+                        {assetList.map(a=><option key={a} value={a}>{a}</option>)}
+                      </select>
+                    </div>
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Timeframe</label>
+                    <select value={form.timeframe} onChange={e=>setField("timeframe",e.target.value)} className={inputCls} style={inputStyle}>
+                      {TIMEFRAMES.map(t=><option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Direction</label>
+                    <select value={form.direction} onChange={e=>setField("direction",e.target.value)} className={inputCls} style={inputStyle}>
+                      <option value="LONG">LONG</option>
+                      <option value="SHORT">SHORT</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Outcome</label>
+                    <select value={form.outcome} onChange={e=>setField("outcome",e.target.value)} className={inputCls} style={inputStyle}>
+                      <option value="Win">Win</option>
+                      <option value="Loss">Loss</option>
+                      <option value="Breakeven">Breakeven</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>P&L ($)</label>
+                    <input value={form.pl} onChange={e=>setField("pl",e.target.value)} placeholder="e.g. 250 or -150"
+                      className={inputCls} style={inputStyle} />
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>ROI (%)</label>
+                    <input value={form.roi} onChange={e=>setField("roi",e.target.value)} placeholder="e.g. 2.5"
+                      className={inputCls} style={inputStyle} />
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Lot Size</label>
+                    <input value={form.lotSize} onChange={e=>setField("lotSize",e.target.value)} placeholder="e.g. 0.10"
+                      className={inputCls} style={inputStyle} />
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Trade Type</label>
+                    <select value={form.tradeType} onChange={e=>setField("tradeType",e.target.value)} className={inputCls} style={inputStyle}>
+                      {TRADE_TYPES.map(t=><option key={t} value={t}>{t}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Rule Followed</label>
+                    <select value={form.ruleFollowed} onChange={e=>setField("ruleFollowed",e.target.value)} className={inputCls} style={inputStyle}>
+                      <option value="YES">YES</option>
+                      <option value="NO">NO</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Emotion</label>
+                    <select value={form.emotion} onChange={e=>setField("emotion",e.target.value)} className={inputCls} style={inputStyle}>
+                      {EMOTIONS.map(e=><option key={e} value={e}>{e}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Rating</label>
+                    <select value={form.rating} onChange={e=>setField("rating",parseInt(e.target.value))} className={inputCls} style={inputStyle}>
+                      {[1,2,3,4,5].map(r=><option key={r} value={r}>{r} Star{r>1?"s":""}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className={labelCls} style={labelStyle}>Start Date & Time</label>
+                    <input type="datetime-local" value={form.startDate} onChange={e=>setField("startDate",e.target.value)}
+                      className={inputCls} style={inputStyle} />
+                  </div>
+                  <div>
+                    <label className={labelCls} style={labelStyle}>End Date & Time</label>
+                    <input type="datetime-local" value={form.endDate} onChange={e=>setField("endDate",e.target.value)}
+                      className={inputCls} style={inputStyle} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Notes */}
+              <div className="rounded-2xl p-5 space-y-4" style={{background:cardBg,border:`1px solid ${cardBorder}`}}>
+                <h3 className="font-semibold text-sm" style={{color:textMain}}>Journal Notes</h3>
+                {[
+                  {key:"notes",label:"Notes",placeholder:"Trade notes, observations, market conditions…"},
+                  {key:"mistakes",label:"Mistakes",placeholder:"What went wrong? What would you do differently?"},
+                  {key:"lessons",label:"Lessons Learned",placeholder:"Key takeaways from this trade…"},
+                ].map(f=>(
+                  <div key={f.key}>
+                    <label className={labelCls} style={labelStyle}>{f.label}</label>
+                    <textarea value={(form as any)[f.key]} onChange={e=>setField(f.key,e.target.value)}
+                      placeholder={f.placeholder} rows={3}
+                      className={`${inputCls} resize-none`} style={inputStyle} />
+                  </div>
+                ))}
+              </div>
+
+              {/* Screenshots */}
+              <div className="rounded-2xl p-5 space-y-4" style={{background:cardBg,border:`1px solid ${cardBorder}`}}>
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-sm" style={{color:textMain}}>Screenshots</h3>
+                  <button type="button" onClick={()=>screenshotInputRef.current?.click()}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-semibold transition-all hover:opacity-90"
+                    style={{background:"linear-gradient(135deg,#7c3aed,#06b6d4)",color:"white"}}>
+                    <Camera size={13}/> Upload Screenshot
+                  </button>
+                  <input ref={screenshotInputRef} type="file" accept="image/*" multiple className="hidden"
+                    onChange={e=>handleScreenshotUpload(e,true)} />
+                </div>
+                {formScreenshots.length > 0 ? (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                    {formScreenshots.map((src,i)=>(
+                      <div key={i} className="relative group rounded-xl overflow-hidden aspect-video" style={{background:inputBg}}>
+                        <img src={src} className="w-full h-full object-cover" alt={`screenshot ${i+1}`} />
+                        <button type="button" onClick={()=>setFormScreenshots(prev=>prev.filter((_,j)=>j!==i))}
+                          className="absolute top-1 right-1 w-6 h-6 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                          style={{background:"#ef4444"}}><X size={10} className="text-white"/></button>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div onClick={()=>screenshotInputRef.current?.click()}
+                    className="border-2 border-dashed rounded-xl p-8 text-center cursor-pointer transition-colors hover:border-violet-500"
+                    style={{borderColor:inputBorder}}>
+                    <ImageIcon size={28} className="mx-auto mb-2 opacity-30" style={{color:textSub}} />
+                    <p className="text-sm" style={{color:textSub}}>Click to upload entry/exit chart screenshots</p>
+                    <p className="text-xs mt-1 opacity-50" style={{color:textSub}}>PNG, JPG, WebP supported</p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex gap-3">
+                <button type="submit" className="flex-1 py-3 rounded-xl font-semibold text-sm text-white transition-all hover:opacity-90"
+                  style={{background:"linear-gradient(135deg,#7c3aed,#06b6d4)"}}>
+                  Save Trade
+                </button>
+                <button type="button" onClick={()=>{ setForm(emptyForm); setFormScreenshots([]); setPage("dashboard"); }}
+                  className="px-6 py-3 rounded-xl font-semibold text-sm border transition-all"
+                  style={{borderColor:cardBorder,color:textSub,background:"transparent"}}>
+                  Cancel
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+
+        {/* ── ANALYTICS ── */}
+        {page==="analytics" && (
+          <div className="p-6 space-y-6">
+            <div>
+              <h1 className="text-2xl font-bold" style={{color:textMain}}>Analytics</h1>
+              <p className="text-sm mt-0.5" style={{color:textSub}}>Deep performance insights from your trading history</p>
+            </div>
+
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              <StatTile label="Best Trade" value={bestTrade?fmtMoney(parseFloat(bestTrade.pl||"0")):"—"} sub={bestTrade?.asset||""} icon={TrendingUp} color="#10b981" dark={dm} />
+              <StatTile label="Worst Trade" value={worstTrade?fmtMoney(parseFloat(worstTrade.pl||"0")):"—"} sub={worstTrade?.asset||""} icon={TrendingDown} color="#ef4444" dark={dm} />
+              <StatTile label="Profit Factor" value={losses>0?(Math.abs(trades.filter(t=>t.outcome==="Win").reduce((s,t)=>s+parseFloat(t.pl||"0"),0))/Math.abs(trades.filter(t=>t.outcome==="Loss").reduce((s,t)=>s+parseFloat(t.pl||"0"),0))).toFixed(2):"∞"} sub="Gross profit / loss" icon={BarChart3} color="#7c3aed" dark={dm} />
+              <StatTile label="Avg Win / Avg Loss" value={wins>0&&losses>0?`${(trades.filter(t=>t.outcome==="Win").reduce((s,t)=>s+parseFloat(t.pl||"0"),0)/wins/Math.abs(trades.filter(t=>t.outcome==="Loss").reduce((s,t)=>s+parseFloat(t.pl||"0"),0)/losses)).toFixed(2)}x`:"—"} sub="Risk/reward ratio" icon={Award} color="#f59e0b" dark={dm} />
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <SectionCard title="Monthly P&L" subtitle="Profit and loss by month" dark={dm}>
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={monthlyData} margin={{left:0,right:0,top:5,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                    <XAxis dataKey="m" tick={{fontSize:10,fill:textSub}} />
+                    <YAxis tick={{fontSize:10,fill:textSub}} />
+                    <Tooltip content={<DarkTooltip dark={dm}/>} />
+                    <Bar dataKey="pl" name="P&L" radius={[4,4,0,0]}>
+                      {monthlyData.map((d,i)=><Cell key={i} fill={d.pl>=0?"#7c3aed":"#ef4444"}/>)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </SectionCard>
+              <SectionCard title="Asset Performance" subtitle="P&L by trading pair" dark={dm}>
+                <ResponsiveContainer width="100%" height={200}>
+                  <BarChart data={assetData} layout="vertical" margin={{left:10,right:0,top:5,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                    <XAxis type="number" tick={{fontSize:10,fill:textSub}} />
+                    <YAxis type="category" dataKey="asset" tick={{fontSize:10,fill:textSub}} width={60} />
+                    <Tooltip content={<DarkTooltip dark={dm}/>} />
+                    <Bar dataKey="pl" name="P&L" radius={[0,4,4,0]}>
+                      {assetData.map((d,i)=><Cell key={i} fill={d.pl>=0?"#10b981":"#ef4444"}/>)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </SectionCard>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <SectionCard title="Trading Hours" subtitle="EST — P&L by hour of day" dark={dm}>
+                <ResponsiveContainer width="100%" height={180}>
+                  <AreaChart data={hourData} margin={{left:0,right:0,top:5,bottom:0}}>
+                    <defs>
+                      <linearGradient id="hrGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.3}/>
+                        <stop offset="95%" stopColor="#06b6d4" stopOpacity={0}/>
+                      </linearGradient>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                    <XAxis dataKey="hour" tick={{fontSize:9,fill:textSub}} />
+                    <YAxis tick={{fontSize:9,fill:textSub}} />
+                    <Tooltip content={<DarkTooltip dark={dm}/>} />
+                    <Area type="monotone" dataKey="pl" name="P&L" stroke="#06b6d4" fill="url(#hrGrad)" strokeWidth={2} />
+                  </AreaChart>
+                </ResponsiveContainer>
+              </SectionCard>
+              <SectionCard title="Weekday Performance" subtitle="P&L by day of week" dark={dm}>
+                <ResponsiveContainer width="100%" height={180}>
+                  <BarChart data={weekdayData} margin={{left:0,right:0,top:5,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                    <XAxis dataKey="day" tick={{fontSize:11,fill:textSub}} />
+                    <YAxis tick={{fontSize:10,fill:textSub}} />
+                    <Tooltip content={<DarkTooltip dark={dm}/>} />
+                    <Bar dataKey="pl" name="P&L" radius={[6,6,0,0]}>
+                      {weekdayData.map((d,i)=><Cell key={i} fill={d.pl>=0?"#10b981":"#ef4444"}/>)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </SectionCard>
+            </div>
+
+            <SectionCard title="Scatter — ROI vs P&L" subtitle="Each dot = one trade" dark={dm}>
+              <ResponsiveContainer width="100%" height={200}>
+                <ScatterChart margin={{left:0,right:0,top:5,bottom:0}}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={dm?"#1e2130":"#f1f5f9"} />
+                  <XAxis dataKey="roi" name="ROI %" tick={{fontSize:10,fill:textSub}} />
+                  <YAxis dataKey="pl" name="P&L $" tick={{fontSize:10,fill:textSub}} />
+                  <Tooltip cursor={{strokeDasharray:"3 3"}} contentStyle={{background:dm?"#1a1d2e":"#fff",border:`1px solid ${cardBorder}`,borderRadius:12,fontSize:12,color:textMain}} />
+                  <Scatter name="Trades" data={trades.map(t=>({roi:parseFloat(t.roi||"0"),pl:parseFloat(t.pl||"0"),outcome:t.outcome}))}
+                    fill="#7c3aed">
+                    {trades.map((t,i)=><Cell key={i} fill={t.outcome==="Win"?"#10b981":t.outcome==="Loss"?"#ef4444":"#6b7280"}/>)}
+                  </Scatter>
+                </ScatterChart>
+              </ResponsiveContainer>
+            </SectionCard>
+          </div>
+        )}
+
+        {/* ── CALENDAR ── */}
+        {page==="calendar" && (
+          <div className="p-6 space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-2xl font-bold" style={{color:textMain}}>Trading Calendar</h1>
+                <p className="text-sm mt-0.5" style={{color:textSub}}>P&L and trade count by day</p>
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={()=>setCalMonth(d=>new Date(d.getFullYear(),d.getMonth()-1,1))}
+                  className="p-2 rounded-xl border transition-colors" style={{borderColor:cardBorder,color:textSub}}>
+                  <ChevronLeft size={16}/>
+                </button>
+                <span className="text-sm font-semibold" style={{color:textMain}}>
+                  {calMonth.toLocaleDateString("en-US",{month:"long",year:"numeric"})}
+                </span>
+                <button onClick={()=>setCalMonth(d=>new Date(d.getFullYear(),d.getMonth()+1,1))}
+                  className="p-2 rounded-xl border transition-colors" style={{borderColor:cardBorder,color:textSub}}>
+                  <ChevronRight size={16}/>
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-2xl p-5" style={{background:cardBg,border:`1px solid ${cardBorder}`}}>
+              <div className="grid grid-cols-7 gap-1 mb-2">
+                {["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].map(d=>(
+                  <div key={d} className="text-center text-xs font-semibold py-2" style={{color:textSub}}>{d}</div>
+                ))}
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {Array.from({length:firstDay}).map((_,i)=><div key={`e${i}`}/>)}
+                {Array.from({length:daysInMonth}).map((_,i)=>{
+                  const day = i+1; const k = day.toString();
+                  const info = calDayMap[k];
+                  const isToday = new Date().getDate()===day && new Date().getMonth()===calMonthIdx && new Date().getFullYear()===calYear;
+                  return (
+                    <div key={day} className="rounded-xl p-2 min-h-[60px] flex flex-col items-center justify-start text-center transition-all"
+                      style={{background:info?(info.pl>=0?"#10b98115":"#ef444415"):(isToday?"#7c3aed15":dm?"#0a0d18":"#f8fafc"),
+                        border:`1px solid ${info?(info.pl>=0?"#10b98133":"#ef444433"):(isToday?"#7c3aed44":cardBorder)}`}}>
+                      <span className="text-xs font-bold" style={{color:isToday?"#7c3aed":textSub}}>{day}</span>
+                      {info && (
+                        <>
+                          <span className="text-xs font-bold mt-1" style={{color:info.pl>=0?"#10b981":"#ef4444"}}>
+                            {fmtMoney(info.pl)}
+                          </span>
+                          <span className="text-xs opacity-60" style={{color:textSub}}>{info.count}t</span>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Monthly summary */}
+            <div className="grid grid-cols-3 gap-4">
+              <StatTile label="Month Trades" value={Object.values(calDayMap).reduce((s,d)=>s+d.count,0)} icon={Activity} color="#7c3aed" dark={dm} />
+              <StatTile label="Month P&L" value={fmtMoney(Object.values(calDayMap).reduce((s,d)=>s+d.pl,0))} icon={DollarSign} color="#10b981" dark={dm} />
+              <StatTile label="Trading Days" value={Object.keys(calDayMap).length} icon={Calendar} color="#f59e0b" dark={dm} />
+            </div>
+          </div>
+        )}
+      </main>
+
+      {/* ── Trade Detail Panel ── */}
+      {detailOpen && selectedTrade && (
+        <div className="fixed inset-0 z-50 flex items-start justify-end p-4 pointer-events-none">
+          <div className="pointer-events-auto w-full max-w-md h-[calc(100vh-2rem)] flex flex-col rounded-2xl overflow-hidden shadow-2xl"
+            style={{background:dm?"#0a0d16":"#ffffff",border:`1px solid ${dm?"#1a1d2e":"#e2e8f0"}`}}>
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 py-4 border-b" style={{borderColor:dm?"#1a1d2e":"#e2e8f0"}}>
+              <div>
+                <p className="text-xs font-semibold tracking-widest" style={{color:"#7c3aed"}}>TRADE REVIEW</p>
+                <h2 className="text-lg font-bold" style={{color:textMain}}>{selectedTrade.asset}</h2>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={()=>setEditMode(v=>!v)} className="p-2 rounded-xl border transition-colors" style={{borderColor:editMode?"#7c3aed":dm?"#1a1d2e":"#e2e8f0",color:editMode?"#7c3aed":textSub}}>
+                  <Edit2 size={15}/>
+                </button>
+                <button onClick={()=>{if(confirm("Delete?"))deleteTrade(selectedTrade.id);}} className="p-2 rounded-xl border transition-colors" style={{borderColor:"#ef444433",color:"#ef4444"}}>
+                  <Trash2 size={15}/>
+                </button>
+                <button onClick={()=>{setDetailOpen(false);setEditMode(false);}} className="p-2 rounded-xl border transition-colors" style={{borderColor:dm?"#1a1d2e":"#e2e8f0",color:textSub}}>
+                  <X size={15}/>
+                </button>
+              </div>
+            </div>
+
+            {/* Content */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-3">
+              {/* Fields */}
+              {[
+                {label:"ASSET",field:"asset",value:selectedTrade.asset,opts:ASSETS},
+                {label:"OUTCOME",field:"outcome",value:selectedTrade.outcome,opts:["Win","Loss","Breakeven"]},
+                {label:"DIRECTION",field:"direction",value:selectedTrade.direction,opts:["LONG","SHORT"]},
+                {label:"P&L ($)",field:"pl",value:selectedTrade.pl?fmtMoney(parseFloat(selectedTrade.pl)):"—"},
+                {label:"ROI (%)",field:"roi",value:selectedTrade.roi?`${selectedTrade.roi}%`:"—"},
+                {label:"LOT SIZE",field:"lotSize",value:selectedTrade.lotSize||"—"},
+                {label:"RULE FOLLOWED",field:"ruleFollowed",value:selectedTrade.ruleFollowed,opts:["YES","NO"]},
+                {label:"EMOTION",field:"emotion",value:selectedTrade.emotion,opts:EMOTIONS},
+                {label:"EXECUTION TIME (EST)",field:null,value:fmtEST(selectedTrade.startDate)},
+              ].map(f=>(
+                <div key={f.label} className="rounded-xl px-4 py-3" style={{background:dm?"#0f1117":"#f8fafc",border:`1px solid ${dm?"#1e2130":"#e2e8f0"}`}}>
+                  <p className="text-xs font-semibold tracking-widest mb-1" style={{color:textSub}}>{f.label}</p>
+                  {editMode && f.field ? (
+                    <InlineEdit value={(selectedTrade as any)[f.field]} dark={dm}
+                      options={f.opts}
+                      onSave={v=>updateTrade(selectedTrade.id,f.field!,v)} />
+                  ) : (
+                    <p className="font-semibold text-sm" style={{color:f.label==="P&L ($)"?(parseFloat(selectedTrade.pl||"0")>=0?"#10b981":"#ef4444"):f.label==="ROI (%)"?(parseFloat(selectedTrade.roi||"0")>=0?"#10b981":"#ef4444"):textMain}}>
+                      {f.value}
+                    </p>
+                  )}
+                </div>
+              ))}
+
+              {/* Rating */}
+              <div className="rounded-xl px-4 py-3" style={{background:dm?"#0f1117":"#f8fafc",border:`1px solid ${dm?"#1e2130":"#e2e8f0"}`}}>
+                <p className="text-xs font-semibold tracking-widest mb-2" style={{color:textSub}}>RATING</p>
+                <StarRating rating={selectedTrade.rating} size={18} onRate={editMode?r=>updateTrade(selectedTrade.id,"rating",r):null} />
+              </div>
+
+              {/* Text fields */}
+              {[
+                {label:"NOTES",field:"notes",placeholder:"No notes added."},
+                {label:"MISTAKES",field:"mistakes",placeholder:"None logged."},
+                {label:"LESSONS LEARNED",field:"lessons",placeholder:"None recorded."},
+              ].map(f=>(
+                <div key={f.label} className="rounded-xl px-4 py-3" style={{background:dm?"#0f1117":"#f8fafc",border:`1px solid ${dm?"#1e2130":"#e2e8f0"}`}}>
+                  <p className="text-xs font-semibold tracking-widest mb-2" style={{color:textSub}}>{f.label}</p>
+                  {editMode ? (
+                    <textarea value={(selectedTrade as any)[f.field]||""} rows={3}
+                      onChange={e=>updateTrade(selectedTrade.id,f.field,e.target.value)}
+                      className="w-full rounded-lg px-3 py-2 text-sm border outline-none resize-none"
+                      style={{background:dm?"#0a0d18":"#ffffff",borderColor:dm?"#1e2130":"#cbd5e1",color:textMain}} />
+                  ) : (
+                    <p className="text-sm" style={{color:(selectedTrade as any)[f.field]?textMain:textSub}}>
+                      {(selectedTrade as any)[f.field]||f.placeholder}
+                    </p>
+                  )}
+                </div>
+              ))}
+
+              {/* Screenshots */}
+              <div className="rounded-xl px-4 py-3" style={{background:dm?"#0f1117":"#f8fafc",border:`1px solid ${dm?"#1e2130":"#e2e8f0"}`}}>
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-xs font-semibold tracking-widest" style={{color:textSub}}>SCREENSHOTS</p>
+                  <label className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold cursor-pointer transition-all hover:opacity-90"
+                    style={{background:"#7c3aed22",color:"#a78bfa"}}>
+                    <Camera size={11}/> Add
+                    <input type="file" accept="image/*" multiple className="hidden" onChange={e=>handleScreenshotUpload(e,false)} />
+                  </label>
+                </div>
+                {(selectedTrade.screenshots||[]).length > 0 ? (
+                  <div className="grid grid-cols-2 gap-2">
+                    {selectedTrade.screenshots.map((src,i)=>(
+                      <div key={i} className="relative group rounded-xl overflow-hidden aspect-video">
+                        <img src={src} className="w-full h-full object-cover" alt={`screenshot ${i+1}`} />
+                        {editMode && (
+                          <button onClick={()=>{
+                            mutate(u=>{const idx=u.trades.findIndex(t=>t.id===selectedTrade.id);if(idx>=0){u.trades[idx].screenshots=u.trades[idx].screenshots.filter((_,j)=>j!==i);}});
+                            setSelectedTrade(prev=>prev?{...prev,screenshots:prev.screenshots.filter((_,j)=>j!==i)}:prev);
+                          }} className="absolute top-1 right-1 w-6 h-6 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity" style={{background:"#ef4444"}}>
+                            <X size={10} className="text-white"/>
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs" style={{color:textSub}}>No screenshots uploaded.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
