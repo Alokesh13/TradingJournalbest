@@ -1,105 +1,54 @@
-@import url("https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap");
 @import "tailwindcss";
 
-:root {
-  color-scheme: dark;
-  font-family: "Plus Jakarta Sans", sans-serif;
-  --font-display: "Sora", sans-serif;
-}
+*, *::before, *::after { box-sizing: border-box; }
 
-* {
-  box-sizing: border-box;
-}
-
-html {
-  scroll-behavior: smooth;
-}
-
-body {
+html, body {
   margin: 0;
-  min-width: 320px;
-  background:
-    radial-gradient(circle at top, rgba(34, 211, 238, 0.08), transparent 26%),
-    radial-gradient(circle at right top, rgba(245, 158, 11, 0.08), transparent 20%),
-    linear-gradient(180deg, #05070b, #08111b 42%, #05070b);
-  color: #f8fafc;
+  padding: 0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
-  background-size: 72px 72px;
-  mask-image: radial-gradient(circle at center, black, transparent 88%);
-  opacity: 0.22;
+/* Landing page: full natural scroll */
+body.landing {
+  overflow: auto;
+  height: auto;
+}
+
+/* Dashboard: lock body, only <main> scrolls */
+body.dashboard {
+  overflow: hidden;
+  height: 100vh;
 }
 
 #root {
-  min-height: 100vh;
+  /* height and overflow set dynamically via body class */
 }
 
-.font-display {
-  font-family: var(--font-display);
+/* Smooth scrolling */
+* { scroll-behavior: smooth; }
+
+/* Custom scrollbar */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2a2d3e; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #7c3aed; }
+
+/* Touch scroll */
+.overflow-auto, .overflow-y-auto, .overflow-x-auto {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
 }
 
-button,
-input,
-select,
-textarea {
-  font: inherit;
+/* GPU acceleration for animated elements */
+.transition-all, [class*="transition"] {
+  will-change: transform;
+  transform: translateZ(0);
 }
 
-img {
-  display: block;
-  max-width: 100%;
-}
+/* Input date-time color fix */
+input[type="datetime-local"] { color-scheme: dark; }
 
-::selection {
-  background: rgba(34, 211, 238, 0.35);
-  color: white;
-}
-
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-
-::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.05);
-}
-
-::-webkit-scrollbar-thumb {
-  border-radius: 999px;
-  background: linear-gradient(180deg, rgba(34, 211, 238, 0.6), rgba(245, 158, 11, 0.6));
-}
-
-::-webkit-scrollbar-thumb:hover {
-  background: linear-gradient(180deg, rgba(34, 211, 238, 0.8), rgba(245, 158, 11, 0.8));
-}
-
-.custom-scrollbar::-webkit-scrollbar {
-  width: 4px;
-}
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.05);
-  border-radius: 10px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-}
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(34, 211, 238, 0.2);
-}
-
-.no-scrollbar::-webkit-scrollbar {
-  display: none;
-}
-.no-scrollbar {
-  -ms-overflow-style: none;
-  scrollbar-width: none;
-}
+/* Recharts responsive */
+.recharts-responsive-container { min-width: 0 !important; }
